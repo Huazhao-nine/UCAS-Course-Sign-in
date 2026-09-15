@@ -757,11 +757,11 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 	}
 
 	.date-control {
-		display: flex;
+		display: grid;
 		width: 100%;
 		max-width: 100%;
 		min-width: 0;
-		flex-direction: column;
+		grid-template-columns: minmax(0, 1fr) 4.7rem;
 		gap: 0.45rem;
 	}
 
@@ -777,6 +777,7 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 	}
 
 	.date-today-btn {
+		min-width: 0;
 		width: 100%;
 		font-size: 0.8rem;
 	}
