@@ -924,18 +924,25 @@ export default function Home() {
 										/>
 									</label>
 
-									<label className="block text-sm font-semibold">
+									<label className="date-field block text-sm font-semibold">
 										日期
 										<div className="date-control mt-2">
 											<input
 												type="date"
-												className="focus-ring input-surface w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
+												className="date-input focus-ring input-surface w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
 												name="courseDate"
 												value={date}
 												onChange={(e) => setDate(e.target.value)}
 												required
 											/>
-											<button type="button" className="date-today-btn" onClick={() => setDate(getTodayInputDate())}>今天</button>
+											<button
+												type="button"
+												className="date-today-btn"
+												onClick={() => setDate(getTodayInputDate())}
+												aria-label="将查询日期设为今天"
+											>
+												今天
+											</button>
 										</div>
 										<span className="date-hint">当前查询：{date}</span>
 									</label>
