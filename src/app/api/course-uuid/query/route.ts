@@ -19,6 +19,13 @@ type CourseItem = {
 	uuid?: string;
 	courseName?: string;
 	teacherName?: string;
+	classroom?: string;
+	classRoom?: string;
+	classroomName?: string;
+	classRoomName?: string;
+	location?: string;
+	place?: string;
+	address?: string;
 	weekDay?: string;
 	classBeginTime?: string;
 	classEndTime?: string;
@@ -212,11 +219,23 @@ function buildLoginBody(username: string, password: string): string {
 }
 
 function sanitizeCourse(item: CourseItem) {
+	const locationFields = [
+		item.classroom,
+		item.classRoom,
+		item.classroomName,
+		item.classRoomName,
+		item.location,
+		item.place,
+		item.address
+	];
+	const classroom = locationFields.find((value) => typeof value === "string" && value.trim())?.trim() ?? "";
+
 	return {
 		id: item.id ?? "",
 		uuid: item.uuid ?? "",
 		courseName: item.courseName ?? "",
 		teacherName: item.teacherName ?? "",
+		classroom,
 		weekDay: item.weekDay ?? "",
 		classBeginTime: item.classBeginTime ?? "",
 		classEndTime: item.classEndTime ?? "",

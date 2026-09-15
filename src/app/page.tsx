@@ -8,6 +8,7 @@ type CourseItem = {
 	uuid: string;
 	courseName: string;
 	teacherName: string;
+	classroom: string;
 	weekDay: string;
 	classBeginTime: string;
 	classEndTime: string;
@@ -33,6 +34,7 @@ type DirectSignResponse = {
 type ThemeMode = "system" | "light" | "dark";
 type StatusKind = "idle" | "loading" | "success" | "error" | "info";
 type FeatureMode = "query" | "manual";
+type ToastState = { kind: Exclude<StatusKind, "idle">; message: string };
 
 type RepoStarsCache = {
 	stars: number;
@@ -48,8 +50,24 @@ const DOWNLOAD_QR_TTL_MS = 10 * 1000;
 // 两者时钟偏差约 3.5s。校准对齐了 timestamp API，需要减去缓冲才能被 sign API 接受。
 const SIGN_TIMESTAMP_BUFFER_MS = 3 * 1000;
 
-const ACTION_STATUS_DEFAULT_TEXT = "生成签到码后，可在此查看下载、复制和点击签到的状态信息";
 const SIGN_BASE_URL = "https://iclass.ucas.edu.cn:8181/app/course/stu_scan_sign.action";
+const DEFAULT_TEST_USERNAME = (process.env.NEXT_PUBLIC_UCAS_TEST_USERNAME ?? "").trim();
+const DEFAULT_TEST_PASSWORD = process.env.NEXT_PUBLIC_UCAS_TEST_PASSWORD ?? "";
+const PERIODS = [
+	{ n: 1, t: "8:30-9:15" },
+	{ n: 2, t: "9:20-10:05" },
+	{ n: 3, t: "10:25-11:10" },
+	{ n: 4, t: "11:15-12:00" },
+	{ n: 5, t: "13:30-14:15" },
+	{ n: 6, t: "14:20-15:05" },
+	{ n: 7, t: "15:25-16:10" },
+	{ n: 8, t: "16:15-17:00" },
+	{ n: 9, t: "17:05-17:50" },
+	{ n: 10, t: "18:30-19:15" },
+	{ n: 11, t: "19:20-20:05" },
+	{ n: 12, t: "20:15-21:00" },
+	{ n: 13, t: "21:05-21:50" }
+] as const;
 
 type QrSource =
 	| {
@@ -93,24 +111,47 @@ function formatRepoDate(isoDate: string): string {
 	return `${month}.${String(day).padStart(2, "0")}`;
 }
 
-function formatRange(start: string, end: string): string {
-	const toTimeOnly = (value: string): string => {
-		if (!value) {
-			return "--";
-		}
+function parseClockToMinutes(value: string): number {
+	const match = String(value || "").match(/(\d{1,2}):(\d{2})/);
+	if (!match) {
+		return 0;
+	}
+	return Number(match[1]) * 60 + Number(match[2]);
+}
 
-		const timeMatch = value.match(/(\d{2}:\d{2}(?::\d{2})?)$/);
-		if (timeMatch) {
-			return timeMatch[1];
-		}
+type CoursePeriodRange = {
+	start: number;
+	end: number;
+};
 
-		return value;
-	};
+function getCoursePeriodRange(course: CourseItem): CoursePeriodRange | null {
+	const start = parseClockToMinutes(course.classBeginTime);
+	const end = parseClockToMinutes(course.classEndTime);
+	if (!start || !end || end <= start) {
+		return null;
+	}
 
-	if (!start && !end) {
+	const matched = PERIODS.filter((period) => {
+		const [periodStart, periodEnd] = period.t.split("-").map(parseClockToMinutes);
+		return start < periodEnd && end > periodStart;
+	});
+	if (matched.length === 0) {
+		return null;
+	}
+
+	return { start: matched[0].n, end: matched[matched.length - 1].n };
+}
+
+function formatCoursePeriods(course: CourseItem): string {
+	const range = getCoursePeriodRange(course);
+	if (!range) {
 		return "--";
 	}
-	return `${toTimeOnly(start)} ~ ${toTimeOnly(end)}`;
+
+	const first = PERIODS[range.start - 1];
+	const last = PERIODS[range.end - 1];
+	const lesson = first.n === last.n ? `第 ${first.n} 节` : `第 ${first.n}-${last.n} 节`;
+	return `${lesson}（${first.t}${first.n === last.n ? "" : `-${last.t.split("-")[1]}`}）`;
 }
 
 function buildSignInUrl(courseId: string, expiresAt: number): string {
@@ -223,20 +264,18 @@ export default function Home() {
 	const [repoStars, setRepoStars] = useState<number | null>(null);
 	const [repoUpdatedAt, setRepoUpdatedAt] = useState<string>("");
 	const [featureMode, setFeatureMode] = useState<FeatureMode>("query");
-	const [username, setUsername] = useState("");
-	const [password, setPassword] = useState("");
+	const [username, setUsername] = useState(DEFAULT_TEST_USERNAME);
+	const [password, setPassword] = useState(DEFAULT_TEST_PASSWORD);
 	const [date, setDate] = useState(getTodayInputDate);
 	const [keyword, setKeyword] = useState("");
 	const [manualIdentifier, setManualIdentifier] = useState("");
 	const [courses, setCourses] = useState<CourseItem[]>([]);
 	const [selectedUuid, setSelectedUuid] = useState("");
-	const [statusText, setStatusText] = useState("输入学号、密码和日期，开始查询课程");
 	const [statusKind, setStatusKind] = useState<StatusKind>("idle");
-	const [actionStatusText, setActionStatusText] = useState(ACTION_STATUS_DEFAULT_TEXT);
-	const [actionStatusKind, setActionStatusKind] = useState<StatusKind>("idle");
+	const [toast, setToast] = useState<ToastState | null>(null);
 	const [loading, setLoading] = useState(false);
 	const [manualLoading, setManualLoading] = useState(false);
-	const [directSignLoading, setDirectSignLoading] = useState(false);
+	const [signingCourseUuid, setSigningCourseUuid] = useState("");
 	const [signUrl, setSignUrl] = useState("");
 	const [qrDataUrl, setQrDataUrl] = useState("");
 	const [expireAt, setExpireAt] = useState(0);
@@ -244,15 +283,27 @@ export default function Home() {
 	const [qrRelayActive, setQrRelayActive] = useState(false);
 	const [qrSource, setQrSource] = useState<QrSource | null>(null);
 	const qrSectionRef = useRef<HTMLDivElement | null>(null);
+	const toastTimerRef = useRef<number | null>(null);
+
+	const showToast = (kind: StatusKind, message: string) => {
+		if (toastTimerRef.current !== null) {
+			window.clearTimeout(toastTimerRef.current);
+		}
+		if (kind === "idle") {
+			setToast(null);
+			return;
+		}
+		setToast({ kind, message });
+		toastTimerRef.current = window.setTimeout(() => setToast(null), kind === "error" ? 6500 : 4200);
+	};
 
 	const updateStatus = (kind: StatusKind, message: string) => {
 		setStatusKind(kind);
-		setStatusText(message);
+		showToast(kind, message);
 	};
 
 	const updateActionStatus = (kind: StatusKind, message: string) => {
-		setActionStatusKind(kind);
-		setActionStatusText(message);
+		showToast(kind, message);
 	};
 
 	const timeOffsetRef = useRef<{ offset: number; fetchedAt: number } | null>(null);
@@ -292,16 +343,24 @@ export default function Home() {
 		void getServerTimeOffset();
 	}, []);
 
+	useEffect(() => {
+		return () => {
+			if (toastTimerRef.current !== null) {
+				window.clearTimeout(toastTimerRef.current);
+			}
+		};
+	}, []);
+
 	const resetGeneratedSignState = () => {
 		setSelectedUuid("");
+		setSigningCourseUuid("");
 		setSignUrl("");
 		setQrDataUrl("");
 		setExpireAt(0);
 		setExpireCountdown(0);
 		setQrRelayActive(false);
 		setQrSource(null);
-		setActionStatusKind("idle");
-		setActionStatusText(ACTION_STATUS_DEFAULT_TEXT);
+		setToast(null);
 	};
 
 	const getPayloadFromSource = (source: QrSource, deadline: number): string | null => {
@@ -347,22 +406,6 @@ export default function Home() {
 			setExpireCountdown(0);
 			return false;
 		}
-	};
-
-	const getStatusBannerClassName = (kind: StatusKind): string => {
-		if (kind === "error") {
-			return "status-banner--error";
-		}
-		if (kind === "success") {
-			return "status-banner--success";
-		}
-		if (kind === "info") {
-			return "status-banner--info";
-		}
-		if (kind === "loading") {
-			return "status-banner--loading";
-		}
-		return "status-banner--neutral";
 	};
 
 	useEffect(() => {
@@ -485,12 +528,28 @@ export default function Home() {
 		});
 	}, [courses, deferredKeyword]);
 
+	const dailySchedule = useMemo(() => {
+		const scheduled: Array<{ course: CourseItem; range: CoursePeriodRange }> = [];
+		const unmatched: CourseItem[] = [];
+
+		for (const course of filteredCourses) {
+			const range = getCoursePeriodRange(course);
+			if (range) {
+				scheduled.push({ course, range });
+			} else {
+				unmatched.push(course);
+			}
+		}
+
+		scheduled.sort((a, b) => a.range.start - b.range.start || a.range.end - b.range.end);
+		return { scheduled, unmatched };
+	}, [filteredCourses]);
+
 	const hasCourses = courses.length > 0;
 	const hasQr = Boolean(qrDataUrl);
 	const queryAttempted = statusKind !== "idle";
 	const hasKeyword = keyword.trim().length > 0;
 	const emptyHelpText = hasKeyword ? "可先清空筛选词，再查看全部课程" : "检查日期是否为上课日，并确认学号与密码正确";
-	const isCourseSelected = (uuid: string): boolean => selectedUuid === uuid;
 
 	const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
@@ -531,29 +590,6 @@ export default function Home() {
 			updateStatus("error", "网络异常，请稍后重试");
 		} finally {
 			setLoading(false);
-		}
-	};
-
-	const onPick = async (uuid: string, courseId: string) => {
-		setSelectedUuid(uuid);
-		const source: QrSource = { mode: "query", uuid, courseId };
-		setQrSource(source);
-
-		const ok = await regenerateAutoQr(source);
-		if (!ok) {
-			updateActionStatus("error", "签到码生成失败，请重新选择课程");
-			return;
-		}
-
-		updateActionStatus("success", "签到码已生成（5秒后自动刷新）");
-
-		if (window.matchMedia("(max-width: 1023px)").matches) {
-			setQrRelayActive(true);
-			window.setTimeout(() => setQrRelayActive(false), 1200);
-			window.requestAnimationFrame(() => {
-				qrSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-			});
-			updateActionStatus("info", "已生成签到码");
 		}
 	};
 
@@ -679,50 +715,31 @@ export default function Home() {
 		}
 	};
 
-	const onDirectSign = async () => {
-		if (directSignBlockedByTime) {
-			updateActionStatus("error", "当前不在签到时间（开课前30分钟至下课前可签到）");
-			return;
-		}
-
-		const courseSchedId =
-			selectedCourse?.id ||
-			(() => {
-				try {
-					const url = new URL(signUrl);
-					return url.searchParams.get("courseSchedId") ?? url.searchParams.get("timeTableId") ?? "";
-				} catch {
-					return "";
-				}
-			})();
-
-		if (!courseSchedId) {
-			updateActionStatus("error", "请先在查询课程模式选择课程并生成签到码");
-			return;
-		}
-
+	const onCourseSign = async (course: CourseItem) => {
 		const safeUsername = username.trim();
 		if (!safeUsername || !password) {
 			updateActionStatus("error", "请先输入学号和密码");
 			return;
 		}
 
-		setDirectSignLoading(true);
+		const classBegin = buildDateTimeFromClock(date, extractClockTime(course.classBeginTime));
+		const classEnd = buildDateTimeFromClock(date, extractClockTime(course.classEndTime));
+		if (!classBegin || !classEnd) {
+			updateActionStatus("error", "课程时间信息异常，暂不支持直接签到");
+			return;
+		}
+		const now = Date.now() + (timeOffsetRef.current?.offset ?? 0);
+		if (now < classBegin.getTime() - 30 * 60 * 1000 || now > classEnd.getTime()) {
+			updateActionStatus("error", "当前不在签到时间（开课前30分钟至下课前可签到）");
+			return;
+		}
+
+		setSigningCourseUuid(course.uuid);
 		updateActionStatus("loading", "正在发起签到…");
 
 		try {
-			// 优先从当前二维码URL中提取时间戳，与扫码行为完全一致
-			let signTimestamp = 0;
-			try {
-				const url = new URL(signUrl);
-				const ts = url.searchParams.get("timestamp");
-				if (ts) signTimestamp = Number(ts);
-			} catch {}
-			// 降级：使用校准后的当前时间戳（减去缓冲）
-			if (!signTimestamp || !Number.isFinite(signTimestamp)) {
-				const offset = await getServerTimeOffset();
-				signTimestamp = Date.now() + offset - SIGN_TIMESTAMP_BUFFER_MS;
-			}
+			const offset = await getServerTimeOffset();
+			const signTimestamp = Date.now() + offset - SIGN_TIMESTAMP_BUFFER_MS;
 
 			const res = await fetch("/api/course-uuid/sign", {
 				method: "POST",
@@ -732,7 +749,7 @@ export default function Home() {
 				body: JSON.stringify({
 					username: safeUsername,
 					password,
-					courseSchedId,
+					courseSchedId: course.id,
 					timestamp: signTimestamp
 				})
 			});
@@ -757,7 +774,7 @@ export default function Home() {
 		} catch {
 			updateActionStatus("error", "网络异常，签到请求未完成");
 		} finally {
-			setDirectSignLoading(false);
+			setSigningCourseUuid("");
 		}
 	};
 
@@ -765,49 +782,16 @@ export default function Home() {
 		setThemeMode(resolvedTheme === "dark" ? "light" : "dark");
 	};
 
-	const selectedCourse = useMemo(() => {
-		if (!selectedUuid) {
-			return null;
-		}
-		return courses.find((item) => item.uuid === selectedUuid) ?? null;
-	}, [courses, selectedUuid]);
-
-	const now = Date.now() + (timeOffsetRef.current?.offset ?? 0);
-
-	const signWindow = useMemo(() => {
-		if (!selectedCourse) {
-			return null;
-		}
-
-		const classBegin = buildDateTimeFromClock(date, extractClockTime(selectedCourse.classBeginTime));
-		const classEnd = buildDateTimeFromClock(date, extractClockTime(selectedCourse.classEndTime));
-		if (!classBegin || !classEnd) {
-			return null;
-		}
-
-		const openAt = new Date(classBegin.getTime() - 30 * 60 * 1000);
-		return {
-			openAt: openAt.getTime(),
-			closeAt: classEnd.getTime()
-		};
-	}, [selectedCourse, date]);
-
-	const directSignBlockedByTime = Boolean(
-		selectedCourse && (!signWindow || now < signWindow.openAt || now > signWindow.closeAt)
-	);
-
-	const directSignDisabled = loading || directSignLoading || !hasQr || !selectedUuid || directSignBlockedByTime;
-
-	const directSignButtonText = directSignLoading
-		? "签到中..."
-		: directSignBlockedByTime
-			? "不在签到时间"
-			: "点击签到";
-
 	return (
 		<>
 			<div className="grain flex min-h-screen flex-col px-4 py-7 sm:px-10">
 				<main className="mx-auto w-full max-w-6xl">
+					{toast ? (
+						<div className={`toast-notification toast-notification--${toast.kind}`} role="status" aria-live={toast.kind === "error" ? "assertive" : "polite"} aria-atomic="true">
+							<p>{toast.message}</p>
+							<button type="button" onClick={() => setToast(null)} aria-label="关闭提示">×</button>
+						</div>
+					) : null}
 					<header className="mb-7">
 						<a href="#main-content" className="sr-only focus:not-sr-only skip-link">
 							跳到主要内容
@@ -818,7 +802,7 @@ export default function Home() {
 							</h1>
 						</div>
 						<p className="mt-4 text-sm leading-7 sm:text-base">
-							查询课程，选择课程后可直接签到或下载签到码。也可以手动输入课程ID或UUID生成签到码。每个签到码每5秒自动刷新，下载二维码10秒有效。
+							查询当天课程后，可直接在课表中完成签到。也可以手动输入课程ID或UUID生成签到码。
 						</p>
 						<div className="utility-toolbar mt-4 flex flex-wrap items-center gap-2.5">
 							<div className="repo-link-group inline-flex min-h-11 items-stretch">
@@ -901,17 +885,19 @@ export default function Home() {
 					{featureMode === "query" ? (
 						<section
 							id="main-content"
-							className="grid items-start gap-5 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] 2xl:grid-cols-[minmax(340px,400px)_minmax(0,1fr)]"
+							className="panel query-workspace rounded-2xl p-5 sm:p-6"
 						>
-							<form onSubmit={onSubmit} className="panel rounded-2xl p-5 sm:p-6">
-								<div className="space-y-1">
-									<h2 className="font-[var(--font-serif)] text-2xl font-semibold">查询课程</h2>
+							<form onSubmit={onSubmit}>
+								<div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+									<div>
+										<h2 className="font-[var(--font-serif)] text-2xl font-semibold">查询课程</h2>
 									<p className="text-xs tracking-[0.08em] uppercase text-[color:var(--green)]">
 										学号和密码仅用于本次查询，不会存储
 									</p>
+									</div>
 								</div>
 
-								<div className="mt-6 space-y-4">
+								<div className="query-toolbar mt-4 grid gap-3 md:grid-cols-[minmax(150px,1fr)_minmax(150px,1fr)_minmax(150px,0.8fr)_auto] md:items-end">
 									<label className="block text-sm font-semibold">
 										学号
 										<input
@@ -940,38 +926,34 @@ export default function Home() {
 
 									<label className="block text-sm font-semibold">
 										日期
-										<input
-											type="date"
-											className="focus-ring input-surface mt-2 w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
-											name="courseDate"
-											value={date}
-											onChange={(e) => setDate(e.target.value)}
-											required
-										/>
+										<div className="date-control mt-2">
+											<input
+												type="date"
+												className="focus-ring input-surface w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
+												name="courseDate"
+												value={date}
+												onChange={(e) => setDate(e.target.value)}
+												required
+											/>
+											<button type="button" className="date-today-btn" onClick={() => setDate(getTodayInputDate())}>今天</button>
+										</div>
+										<span className="date-hint">当前查询：{date}</span>
 									</label>
 
 									<button
 										disabled={loading}
-										className="action-btn action-btn--primary w-full rounded-xl px-4 py-3 text-sm font-semibold"
+										className="action-btn action-btn--primary min-h-11 w-full rounded-xl px-5 py-2.5 text-sm font-semibold md:w-auto"
 										type="submit"
 									>
 										{loading ? "查询中..." : "查询课程"}
 									</button>
 								</div>
 
-								<p
-									role="status"
-									aria-live={statusKind === "error" ? "assertive" : "polite"}
-									aria-atomic="true"
-									className={`status-banner mt-4 rounded-xl px-3 py-2 text-sm leading-6 ${getStatusBannerClassName(statusKind)}`}
-								>
-									{statusText}
-								</p>
 							</form>
 
-							<div className="panel rounded-2xl p-5 sm:p-6">
+							<div className="schedule-section mt-6 border-t border-[color:var(--line)] pt-5">
 								<div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-									<h2 className="font-[var(--font-serif)] text-2xl font-semibold">选择课程</h2>
+									<h2 className="font-[var(--font-serif)] text-2xl font-semibold">当日课表</h2>
 									{hasCourses ? (
 										<input
 											className="focus-ring input-surface min-h-11 w-full rounded-xl border border-[color:var(--line)] px-4 py-2 text-sm md:w-auto md:min-w-[230px]"
@@ -984,218 +966,43 @@ export default function Home() {
 									) : null}
 								</div>
 
-								<div className="mt-4 space-y-4">
-									<div className="space-y-3 lg:hidden">
-										{filteredCourses.length === 0 ? (
-											<div className="clay-card rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-raised)] px-4 py-8 text-center text-sm text-[color:var(--green)]">
-												<p>暂无课程数据</p>
-												{queryAttempted ? (
-													<p className="mt-2 text-xs leading-5 text-[color:var(--muted)]">
-														{emptyHelpText}
-													</p>
-												) : null}
+								<div className="mt-4 space-y-3">
+									{filteredCourses.length === 0 ? (
+										<div className="clay-card rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-raised)] px-4 py-8 text-center text-sm text-[color:var(--green)]">
+											<p>当天暂无课程数据</p>
+											{queryAttempted ? <p className="mt-2 text-xs leading-5 text-[color:var(--muted)]">{emptyHelpText}</p> : null}
+										</div>
+									) : (
+										<div className="daily-schedule-wrap overflow-x-auto rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-raised)]">
+											<div className="daily-schedule-header">
+												<span>节次 / 时间</span>
+												<span>{date} 当日课程</span>
 											</div>
-										) : (
-											filteredCourses.map((course) => {
-												const selected = isCourseSelected(course.uuid);
-												return (
-													<article
-														key={`${course.id}-${course.uuid}`}
-														className={`course-item clay-card rounded-xl border p-4 ${
-															selected
-																? "course-item--selected border-[color:var(--line-strong)] bg-[color:var(--paper-strong)]"
-																: "border-[color:var(--line)] bg-[color:var(--surface-raised)]"
-														}`}
-													>
-														<div className="flex items-start justify-between gap-3">
-															<div className="min-w-0">
-																<h3 className="text-sm font-semibold leading-6 break-words">
-																	{course.courseName || "--"}
-																</h3>
-															</div>
-															<span
-																className={`status-chip rounded-md border px-2 py-1 text-xs ${
-																	course.signStatus === "1"
-																		? "status-chip--signed"
-																		: "status-chip--unsigned"
-																}`}
-															>
-																{course.signStatus === "1" ? "已签到" : "未签到"}
-															</span>
-														</div>
-														<dl className="mt-2 grid grid-cols-[40px_1fr] gap-x-2 gap-y-1 text-xs text-[color:var(--muted)]">
-															<dt className="font-medium">教师</dt>
-															<dd className="break-words">
-																{course.teacherName || "--"}
-															</dd>
-															<dt className="font-medium">时段</dt>
-															<dd className="break-words">
-																{formatRange(
-																	course.classBeginTime,
-																	course.classEndTime
-																)}
-															</dd>
-														</dl>
-														<button
-															type="button"
-															onClick={() => onPick(course.uuid, course.id)}
-															className="action-btn action-btn--secondary mt-3 w-full min-h-11 rounded-lg px-3.5 py-2 text-sm font-semibold"
-														>
-															{selected ? "已选中" : "生成签到码"}
-														</button>
-													</article>
-												);
-											})
-										)}
-									</div>
-
-									<div className="render-skip clay-card hidden overflow-x-auto rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-raised)] lg:block">
-										<table className="min-w-full text-sm">
-											<caption className="sr-only">课程查询结果和签到码生成操作</caption>
-											<thead className="bg-[color:var(--paper-strong)] text-left text-[color:var(--muted)]">
-												<tr>
-													<th className="px-3 py-3">课程</th>
-													<th className="px-3 py-3">教师</th>
-													<th className="px-3 py-3">时段</th>
-													<th className="px-3 py-3">状态</th>
-													<th className="px-3 py-3">操作</th>
-												</tr>
-											</thead>
-											<tbody>
-												{filteredCourses.length === 0 ? (
-													<tr>
-														<td
-															colSpan={5}
-															className="px-3 py-8 text-center text-[color:var(--green)]"
-														>
-															<p>暂无课程数据</p>
-															{queryAttempted ? (
-																<p className="mt-2 text-xs leading-5 text-[color:var(--muted)]">
-																	{emptyHelpText}
-																</p>
-															) : null}
-														</td>
-													</tr>
-												) : (
-													filteredCourses.map((course) => {
-														const selected = isCourseSelected(course.uuid);
-														return (
-															<tr
-																key={`${course.id}-${course.uuid}`}
-																className={`course-row ${
-																	selected
-																		? "bg-[color:var(--paper-strong)]"
-																		: "bg-[color:var(--surface-raised)]"
-																}`}
-															>
-																<td className="max-w-[170px] px-3 py-3 font-medium break-words">
-																	{course.courseName || "--"}
-																</td>
-																<td className="px-3 py-3">
-																	{course.teacherName || "--"}
-																</td>
-																<td className="max-w-[180px] px-3 py-3 break-words">
-																	{formatRange(
-																		course.classBeginTime,
-																		course.classEndTime
-																	)}
-																</td>
-																<td className="px-3 py-3">
-																	<span
-																		className={`status-chip rounded-md border px-2 py-1 text-xs ${
-																			course.signStatus === "1"
-																				? "status-chip--signed"
-																				: "status-chip--unsigned"
-																		}`}
-																	>
-																		{course.signStatus === "1"
-																			? "已签到"
-																			: "未签到"}
-																	</span>
-																</td>
-																<td className="px-3 py-3">
-																	<button
-																		type="button"
-																		onClick={() => onPick(course.uuid, course.id)}
-																		className="action-btn action-btn--secondary min-h-11 rounded-lg px-3.5 py-2 text-xs font-semibold"
-																	>
-																		{selected ? "已选中" : "生成签到码"}
-																	</button>
-																</td>
-															</tr>
-														);
-													})
-												)}
-											</tbody>
-										</table>
-									</div>
-
-									<div
-										ref={qrSectionRef}
-										className={`render-skip clay-card rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] p-4 ${
-											qrRelayActive ? "relay-highlight" : ""
-										}`}
-									>
-										{hasQr ? (
-											<div className="grid gap-4 lg:grid-cols-[220px_1fr] lg:items-center">
-												<Image
-													src={qrDataUrl}
-													alt="签到码"
-													width={220}
-													height={220}
-													unoptimized
-													className="w-[220px] max-w-full rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-raised)] p-2"
-												/>
-												<div className="space-y-3 text-sm numeric-tabular">
-													<p>
-														刷新倒计时：
-														<span className="font-semibold">{expireCountdown}s</span>
-													</p>
-													<p className="break-all font-mono text-xs leading-6 text-[color:var(--muted)]">
-														{signUrl}
-													</p>
-													<div className="flex flex-wrap gap-2">
-														<button
-															type="button"
-															onClick={onDirectSign}
-															disabled={directSignDisabled}
-															className="action-btn action-btn--primary min-h-11 rounded-lg px-3.5 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
-														>
-															{directSignButtonText}
-														</button>
-														<button
-															type="button"
-															onClick={onDownloadQr}
-															className="action-btn action-btn--secondary min-h-11 rounded-lg px-3.5 py-2 text-xs font-semibold"
-														>
-															下载二维码
-														</button>
-														<button
-															type="button"
-															onClick={onCopySignUrl}
-															className="action-btn action-btn--quiet min-h-11 rounded-lg px-3.5 py-2 text-xs font-semibold"
-														>
-															复制签到链接
-														</button>
+											<div className="daily-schedule-grid">
+												{PERIODS.map((period) => (
+													<div key={period.n} className="daily-schedule-period" style={{ gridRow: period.n }}>
+														<strong>第 {period.n} 节</strong>
+														<span>{period.t}</span>
 													</div>
-													<p
-														role="status"
-														aria-live={
-															actionStatusKind === "error" ? "assertive" : "polite"
-														}
-														aria-atomic="true"
-														className={`status-banner rounded-xl px-3 py-2 text-xs leading-6 ${getStatusBannerClassName(actionStatusKind)}`}
-													>
-														{actionStatusText}
-													</p>
-												</div>
+												))}
+												{PERIODS.map((period) => <div key={`line-${period.n}`} className="daily-schedule-line" style={{ gridRow: period.n }} />)}
+												{dailySchedule.scheduled.map(({ course, range }) => {
+													const signed = course.signStatus === "1";
+													const signingThisCourse = signingCourseUuid === course.uuid;
+													return (
+														<article key={`${course.id}-${course.uuid}`} style={{ gridRow: `${range.start} / ${range.end + 1}` }} className={`daily-schedule-course ${signed ? "daily-schedule-course--signed" : "daily-schedule-course--unsigned"}`}>
+															<div className="flex items-start justify-between gap-2"><h3>{course.courseName || "--"}</h3><span>{signed ? "已签到" : "未签到"}</span></div>
+															<p>{course.teacherName || "--"} · {course.classroom || "教室待课表接口提供"}</p>
+															<p>{formatCoursePeriods(course)}</p>
+															<button type="button" onClick={() => onCourseSign(course)} disabled={loading || signed || signingThisCourse} className="action-btn action-btn--primary mt-3 min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60">{signingThisCourse ? "签到中..." : signed ? "已签到" : "签到"}</button>
+														</article>
+													);
+												})}
 											</div>
-										) : (
-											<p className="text-sm text-center text-[color:var(--green)]">
-												暂无签到码数据
-											</p>
-										)}
-									</div>
+										</div>
+									)}
+									{dailySchedule.unmatched.length > 0 ? <p className="text-xs text-[color:var(--muted)]">有 {dailySchedule.unmatched.length} 门课程的上课时间无法匹配至标准节次，未放入课表。</p> : null}
+
 								</div>
 							</div>
 						</section>
@@ -1236,14 +1043,6 @@ export default function Home() {
 									</button>
 								</div>
 
-								<p
-									role="status"
-									aria-live={statusKind === "error" ? "assertive" : "polite"}
-									aria-atomic="true"
-									className={`status-banner mt-4 rounded-xl px-3 py-2 text-sm leading-6 ${getStatusBannerClassName(statusKind)}`}
-								>
-									{statusText}
-								</p>
 							</form>
 
 							<div
