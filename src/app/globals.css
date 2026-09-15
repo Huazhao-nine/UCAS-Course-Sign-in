@@ -420,6 +420,10 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 	letter-spacing: 0.04em;
 }
 
+.query-toolbar > * {
+	min-width: 0;
+}
+
 .query-toolbar input {
 	background: color-mix(in oklab, var(--surface-raised) 88%, var(--surface));
 	font-size: 0.9rem;
@@ -438,13 +442,26 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 }
 
 .date-field {
+	width: 100%;
+	max-width: 100%;
 	min-width: 0;
 }
 
+.date-control {
+	width: 100%;
+	max-width: 100%;
+	min-inline-size: 0;
+}
+
 .date-control .date-input {
+	box-sizing: border-box;
+	inline-size: 100%;
+	max-inline-size: 100%;
+	min-inline-size: 0;
 	min-width: 0;
 	min-height: 2.85rem;
-	padding-right: 0.85rem;
+	padding-left: 0.8rem;
+	padding-right: 0.65rem;
 	color-scheme: light;
 	font-variant-numeric: tabular-nums;
 	letter-spacing: 0.02em;
@@ -740,11 +757,21 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 	}
 
 	.date-control {
-		grid-template-columns: 1fr;
+		display: flex;
+		width: 100%;
+		max-width: 100%;
+		min-width: 0;
+		flex-direction: column;
 		gap: 0.45rem;
 	}
 
-	.date-control .date-input,
+	.date-control .date-input {
+		width: 100%;
+		max-width: 100%;
+		min-width: 0;
+		font-size: 16px;
+	}
+
 	.date-today-btn {
 		min-height: 3rem;
 	}
