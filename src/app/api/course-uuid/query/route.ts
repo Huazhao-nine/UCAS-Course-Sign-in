@@ -86,6 +86,24 @@ function normalizeDateToYyyyMMdd(input: string): string | null {
 	return compact;
 }
 
+function getWeekDates(date: string): string[] {
+	const year = Number(date.slice(0, 4));
+	const month = Number(date.slice(4, 6)) - 1;
+	const day = Number(date.slice(6, 8));
+	const base = new Date(year, month, day);
+	const mondayOffset = (base.getDay() + 6) % 7;
+	base.setDate(base.getDate() - mondayOffset);
+
+	return Array.from({ length: 7 }, (_, index) => {
+		const current = new Date(base);
+		current.setDate(base.getDate() + index);
+		const yyyy = current.getFullYear();
+		const mm = String(current.getMonth() + 1).padStart(2, "0");
+		const dd = String(current.getDate()).padStart(2, "0");
+		return `${yyyy}${mm}${dd}`;
+	});
+}
+
 function toPositiveInt(value: string | undefined, fallback: number): number {
 	if (!value) {
 		return fallback;
@@ -283,6 +301,7 @@ export async function POST(req: NextRequest) {
 		const username = String(bodyObject.username ?? "").trim();
 		const password = String(bodyObject.password ?? "");
 		const dateInput = String(bodyObject.date ?? "").trim();
+		const includeWeek = bodyObject.week === true;
 
 		if (isCredentialInputInvalid(username, password)) {
 			return jsonWithHeaders({ message: "学号或密码格式错误" }, { status: 400 });
@@ -339,53 +358,60 @@ export async function POST(req: NextRequest) {
 		}
 
 		stage = "schedule";
-		const scheduleAbortController = new AbortController();
-		const scheduleTimeout = setTimeout(() => scheduleAbortController.abort(), REQUEST_TIMEOUT_MS);
-
-		let scheduleData: ScheduleResponse;
-		try {
-			const scheduleUrl = `${SCHEDULE_URL}?id=${encodeURIComponent(userId)}&dateStr=${encodeURIComponent(date)}`;
-			const scheduleRes = await fetch(scheduleUrl, {
-				method: "GET",
-				headers: {
-					sessionId,
-					"User-Agent": API_UA
-				},
-				cache: "no-store",
-				signal: scheduleAbortController.signal
-			});
-
-			if (!scheduleRes.ok) {
-				throw new ApiError(
-					502,
-					"UPSTREAM_SCHEDULE_HTTP",
-					`课表接口HTTP异常: ${scheduleRes.status}`,
-					"schedule"
-				);
-			}
-
+		const fetchSchedule = async (targetDate: string, allowEmptyDay = false): Promise<CourseItem[]> => {
+			const scheduleAbortController = new AbortController();
+			const scheduleTimeout = setTimeout(() => scheduleAbortController.abort(), REQUEST_TIMEOUT_MS);
 			try {
-				scheduleData = (await scheduleRes.json()) as ScheduleResponse;
-			} catch {
-				throw new ApiError(502, "UPSTREAM_SCHEDULE_BAD_JSON", "课表接口返回非JSON", "schedule");
+				const scheduleUrl = `${SCHEDULE_URL}?id=${encodeURIComponent(userId)}&dateStr=${encodeURIComponent(targetDate)}`;
+				const scheduleRes = await fetch(scheduleUrl, {
+					method: "GET",
+					headers: { sessionId, "User-Agent": API_UA },
+					cache: "no-store",
+					signal: scheduleAbortController.signal
+				});
+				if (!scheduleRes.ok) {
+					throw new ApiError(502, "UPSTREAM_SCHEDULE_HTTP", `课表接口HTTP异常: ${scheduleRes.status}`, "schedule");
+				}
+				let scheduleData: ScheduleResponse;
+				try {
+					scheduleData = (await scheduleRes.json()) as ScheduleResponse;
+				} catch {
+					throw new ApiError(502, "UPSTREAM_SCHEDULE_BAD_JSON", "课表接口返回非JSON", "schedule");
+				}
+				if (scheduleData?.STATUS !== "0" && allowEmptyDay) {
+					// UCAS 对部分无课日会返回非 0 状态，而非成功的空数组。
+					// 周课表应保留该日期，并将其展示为“当天无课程”。
+					return [];
+				}
+				if (scheduleData?.STATUS !== "0") {
+					throw new ApiError(502, "UPSTREAM_SCHEDULE_BAD_STATUS", "课表查询失败", "schedule");
+				}
+				return scheduleData.result ?? [];
+			} catch (error) {
+				if (error instanceof ApiError) throw error;
+				if (error instanceof Error && error.name === "AbortError") {
+					throw new ApiError(504, "UPSTREAM_SCHEDULE_TIMEOUT", "课表接口请求超时", "schedule");
+				}
+				throw new ApiError(502, "UPSTREAM_SCHEDULE_NETWORK", "课表接口网络异常", "schedule");
+			} finally {
+				clearTimeout(scheduleTimeout);
 			}
-		} catch (error) {
-			if (error instanceof ApiError) {
-				throw error;
+		};
+
+		if (includeWeek) {
+			const dates = getWeekDates(date);
+			const days = [];
+			for (const targetDate of dates) {
+				const courses = (await fetchSchedule(targetDate, true)).map(sanitizeCourse);
+				days.push({ date: targetDate, courses });
 			}
-			if (error instanceof Error && error.name === "AbortError") {
-				throw new ApiError(504, "UPSTREAM_SCHEDULE_TIMEOUT", "课表接口请求超时", "schedule");
-			}
-			throw new ApiError(502, "UPSTREAM_SCHEDULE_NETWORK", "课表接口网络异常", "schedule");
-		} finally {
-			clearTimeout(scheduleTimeout);
+			return jsonWithHeaders(
+				{ weekStart: dates[0], weekEnd: dates[6], total: days.reduce((sum, day) => sum + day.courses.length, 0), days },
+				{ status: 200 }
+			);
 		}
 
-		if (scheduleData?.STATUS !== "0") {
-			return jsonWithHeaders({ message: "课表查询失败，或当天无课程" }, { status: 502 });
-		}
-
-		const courses = (scheduleData.result ?? []).map(sanitizeCourse);
+		const courses = (await fetchSchedule(date)).map(sanitizeCourse);
 
 		return jsonWithHeaders(
 			{

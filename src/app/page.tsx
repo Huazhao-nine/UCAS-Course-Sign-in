@@ -13,12 +13,20 @@ type CourseItem = {
 	classBeginTime: string;
 	classEndTime: string;
 	signStatus: string;
+	scheduleDate?: string;
 };
 
 type QueryResponse = {
 	date: string;
 	total: number;
 	courses: CourseItem[];
+};
+
+type WeekResponse = {
+	weekStart: string;
+	weekEnd: string;
+	total: number;
+	days: Array<{ date: string; courses: CourseItem[] }>;
 };
 
 type DirectSignResponse = {
@@ -34,6 +42,7 @@ type DirectSignResponse = {
 type ThemeMode = "system" | "light" | "dark";
 type StatusKind = "idle" | "loading" | "success" | "error" | "info";
 type FeatureMode = "query" | "manual";
+type ScheduleView = "day" | "week";
 type ToastState = { kind: Exclude<StatusKind, "idle">; message: string };
 
 type RepoStarsCache = {
@@ -42,8 +51,15 @@ type RepoStarsCache = {
 	updatedAt: number;
 };
 
+type WeekScheduleCache = {
+	weekStart: string;
+	cachedAt: number;
+	days: WeekResponse["days"];
+};
+
 const REPO_STARS_CACHE_KEY = "ucas-repo-stars-cache-v1";
 const REPO_STARS_CACHE_TTL_MS = 1000 * 60 * 30;
+const WEEK_SCHEDULE_CACHE_PREFIX = "ucas-week-schedule-cache-v1:";
 const AUTO_QR_TTL_MS = 5 * 1000;
 const DOWNLOAD_QR_TTL_MS = 10 * 1000;
 // UCAS 的 get_timestamp.do 与 stu_scan_sign.action 运行在不同服务器上，
@@ -90,6 +106,68 @@ function getSavedThemeMode(): ThemeMode {
 
 function toYyyyMMdd(dateInput: string): string {
 	return dateInput.replace(/-/g, "");
+}
+
+function toDateInput(compactDate: string): string {
+	return `${compactDate.slice(0, 4)}-${compactDate.slice(4, 6)}-${compactDate.slice(6, 8)}`;
+}
+
+function formatWeekday(compactDate: string): string {
+	const value = new Date(`${toDateInput(compactDate)}T12:00:00`);
+	return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][value.getDay()] ?? "";
+}
+
+function attachScheduleDates(days: WeekResponse["days"]): WeekResponse["days"] {
+	return days.map((day) => ({
+		...day,
+		courses: day.courses.map((course) => ({ ...course, scheduleDate: toDateInput(day.date) }))
+	}));
+}
+
+function getWeekCacheKey(username: string, weekStart: string): string {
+	let hash = 2166136261;
+	for (const char of username.trim()) {
+		hash ^= char.charCodeAt(0);
+		hash = Math.imul(hash, 16777619);
+	}
+	return `${WEEK_SCHEDULE_CACHE_PREFIX}${(hash >>> 0).toString(36)}:${weekStart}`;
+}
+
+function readWeekScheduleCache(username: string, weekStart: string): WeekScheduleCache | null {
+	try {
+		const raw = window.localStorage.getItem(getWeekCacheKey(username, weekStart));
+		if (!raw) return null;
+		const cache = JSON.parse(raw) as WeekScheduleCache;
+		if (!Array.isArray(cache.days) || cache.weekStart !== weekStart || typeof cache.cachedAt !== "number") return null;
+		return cache;
+	} catch {
+		return null;
+	}
+}
+
+function writeWeekScheduleCache(username: string, weekStart: string, days: WeekResponse["days"]): void {
+	try {
+		window.localStorage.setItem(getWeekCacheKey(username, weekStart), JSON.stringify({ weekStart, cachedAt: Date.now(), days } satisfies WeekScheduleCache));
+	} catch {}
+}
+
+function clearWeekScheduleCaches(): void {
+	try {
+		for (let index = window.localStorage.length - 1; index >= 0; index -= 1) {
+			const key = window.localStorage.key(index);
+			if (key?.startsWith(WEEK_SCHEDULE_CACHE_PREFIX)) window.localStorage.removeItem(key);
+		}
+	} catch {}
+}
+
+function formatCachedAt(timestamp: number): string {
+	return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(timestamp);
+}
+
+function getWeekStart(compactDate: string): string {
+	const value = new Date(`${toDateInput(compactDate)}T12:00:00`);
+	value.setDate(value.getDate() - ((value.getDay() + 6) % 7));
+	return `${value.getFullYear()}${String(value.getMonth() + 1).padStart(2, "0")}${String(value.getDate()).padStart(2, "0")}`;
 }
 
 function getTodayInputDate(): string {
@@ -270,6 +348,9 @@ export default function Home() {
 	const [keyword, setKeyword] = useState("");
 	const [manualIdentifier, setManualIdentifier] = useState("");
 	const [courses, setCourses] = useState<CourseItem[]>([]);
+	const [weeklyDays, setWeeklyDays] = useState<WeekResponse["days"]>([]);
+	const [scheduleView, setScheduleView] = useState<ScheduleView>("day");
+	const [weekCacheUpdatedAt, setWeekCacheUpdatedAt] = useState<number | null>(null);
 	const [selectedUuid, setSelectedUuid] = useState("");
 	const [statusKind, setStatusKind] = useState<StatusKind>("idle");
 	const [toast, setToast] = useState<ToastState | null>(null);
@@ -546,13 +627,27 @@ export default function Home() {
 	}, [filteredCourses]);
 
 	const hasCourses = courses.length > 0;
+	const hasWeeklyCourses = weeklyDays.some((day) => day.courses.length > 0);
 	const hasQr = Boolean(qrDataUrl);
 	const queryAttempted = statusKind !== "idle";
 	const hasKeyword = keyword.trim().length > 0;
 	const emptyHelpText = hasKeyword ? "可先清空筛选词，再查看全部课程" : "检查日期是否为上课日，并确认学号与密码正确";
 
-	const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
-		event.preventDefault();
+	const queryCourses = async (skipWeekCache = false) => {
+		const compactDate = toYyyyMMdd(date);
+		const safeUsername = username.trim();
+		const weekStart = getWeekStart(compactDate);
+		if (scheduleView === "week" && !skipWeekCache && safeUsername) {
+			const cache = readWeekScheduleCache(safeUsername, weekStart);
+			if (cache) {
+				setCourses([]);
+				setWeeklyDays(attachScheduleDates(cache.days));
+				setWeekCacheUpdatedAt(cache.cachedAt);
+				updateStatus("success", `已载入本地缓存（${formatCachedAt(cache.cachedAt)}），可随时刷新本周`);
+				return;
+			}
+		}
+
 		setLoading(true);
 		setSelectedUuid("");
 		setSignUrl("");
@@ -569,28 +664,57 @@ export default function Home() {
 					"Content-Type": "application/json"
 				},
 				body: JSON.stringify({
-					username: username.trim(),
+					username: safeUsername,
 					password,
-					date: toYyyyMMdd(date)
+					date: compactDate,
+					week: scheduleView === "week"
 				})
 			});
 
-			const data = (await res.json()) as QueryResponse & { message?: string };
+			const data = (await res.json()) as (QueryResponse | WeekResponse) & { message?: string };
 
 			if (!res.ok) {
 				setCourses([]);
+				setWeeklyDays([]);
+				setWeekCacheUpdatedAt(null);
 				updateStatus("error", data.message ?? "查询失败，请重试");
 				return;
 			}
 
-			setCourses(data.courses ?? []);
-			updateStatus("success", `已查询到 ${data.total} 门课程（${data.date}）`);
+			if (scheduleView === "week") {
+				const weekData = data as WeekResponse;
+				const cachedDays = weekData.days ?? [];
+				setCourses([]);
+				setWeeklyDays(attachScheduleDates(cachedDays));
+				writeWeekScheduleCache(safeUsername, weekData.weekStart, cachedDays);
+				setWeekCacheUpdatedAt(Date.now());
+				updateStatus("success", `已查询到本周 ${weekData.total ?? 0} 门课程（${weekData.weekStart}-${weekData.weekEnd}）`);
+			} else {
+				const dayData = data as QueryResponse;
+				setWeeklyDays([]);
+				setWeekCacheUpdatedAt(null);
+				setCourses(dayData.courses ?? []);
+				updateStatus("success", `已查询到 ${dayData.total} 门课程（${dayData.date}）`);
+			}
 		} catch {
 			setCourses([]);
+			setWeeklyDays([]);
+			setWeekCacheUpdatedAt(null);
 			updateStatus("error", "网络异常，请稍后重试");
 		} finally {
 			setLoading(false);
 		}
+	};
+
+	const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+		event.preventDefault();
+		void queryCourses();
+	};
+
+	const onClearWeekCache = () => {
+		clearWeekScheduleCaches();
+		setWeekCacheUpdatedAt(null);
+		updateActionStatus("info", "本地课表缓存已清除；再次查询将访问课表接口");
 	};
 
 	const onManualGenerate = async (event: FormEvent<HTMLFormElement>) => {
@@ -699,17 +823,27 @@ export default function Home() {
 				body: JSON.stringify({
 					username: username.trim(),
 					password,
-					date: toYyyyMMdd(date)
+					date: toYyyyMMdd(date),
+					week: scheduleView === "week"
 				})
 			});
 
-			const data = (await res.json()) as QueryResponse & { message?: string };
+			const data = (await res.json()) as (QueryResponse | WeekResponse) & { message?: string };
 			if (!res.ok) {
 				return { ok: false };
 			}
 
-			setCourses(data.courses ?? []);
-			return { ok: true, total: data.total ?? (data.courses ?? []).length };
+			if (scheduleView === "week") {
+				const weekData = data as WeekResponse;
+				const cachedDays = weekData.days ?? [];
+				setWeeklyDays(attachScheduleDates(cachedDays));
+				writeWeekScheduleCache(username.trim(), weekData.weekStart, cachedDays);
+				setWeekCacheUpdatedAt(Date.now());
+				return { ok: true, total: weekData.total ?? 0 };
+			}
+			const dayData = data as QueryResponse;
+			setCourses(dayData.courses ?? []);
+			return { ok: true, total: dayData.total ?? dayData.courses.length };
 		} catch {
 			return { ok: false };
 		}
@@ -722,8 +856,9 @@ export default function Home() {
 			return;
 		}
 
-		const classBegin = buildDateTimeFromClock(date, extractClockTime(course.classBeginTime));
-		const classEnd = buildDateTimeFromClock(date, extractClockTime(course.classEndTime));
+		const courseDate = course.scheduleDate ?? date;
+		const classBegin = buildDateTimeFromClock(courseDate, extractClockTime(course.classBeginTime));
+		const classEnd = buildDateTimeFromClock(courseDate, extractClockTime(course.classEndTime));
 		if (!classBegin || !classEnd) {
 			updateActionStatus("error", "课程时间信息异常，暂不支持直接签到");
 			return;
@@ -802,7 +937,7 @@ export default function Home() {
 							</h1>
 						</div>
 						<p className="mt-4 text-sm leading-7 sm:text-base">
-							查询当天课程后，可直接在课表中完成签到。也可以手动输入课程ID或UUID生成签到码。
+							查询当天或本周课程后，可直接在课表中完成签到。也可以手动输入课程ID或UUID生成签到码。
 						</p>
 						<div className="utility-toolbar mt-4 flex flex-wrap items-center gap-2.5">
 							<div className="repo-link-group inline-flex min-h-11 items-stretch">
@@ -955,13 +1090,18 @@ export default function Home() {
 										{loading ? "查询中..." : "查询课程"}
 									</button>
 								</div>
+								<div className="schedule-view-switch mt-3" role="group" aria-label="课表查询范围">
+									<button type="button" onClick={() => { setScheduleView("day"); setCourses([]); setWeeklyDays([]); setWeekCacheUpdatedAt(null); updateStatus("idle", "将查询选定日期当天的课程"); }} className={scheduleView === "day" ? "schedule-view-switch__option schedule-view-switch__option--active" : "schedule-view-switch__option"} aria-pressed={scheduleView === "day"}>当日课表</button>
+									<button type="button" onClick={() => { setScheduleView("week"); setCourses([]); setWeeklyDays([]); setWeekCacheUpdatedAt(null); updateStatus("idle", "将查询选定日期所在周（周一至周日）的课程"); }} className={scheduleView === "week" ? "schedule-view-switch__option schedule-view-switch__option--active" : "schedule-view-switch__option"} aria-pressed={scheduleView === "week"}>本周课表</button>
+									<span>{scheduleView === "week" ? "一次登录查询周一至周日" : "仅查询所选日期"}</span>
+								</div>
 
 							</form>
 
 							<div className="schedule-section mt-6 border-t border-[color:var(--line)] pt-5">
 								<div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-									<h2 className="font-[var(--font-serif)] text-2xl font-semibold">当日课表</h2>
-									{hasCourses ? (
+									<h2 className="font-[var(--font-serif)] text-2xl font-semibold">{scheduleView === "week" ? "本周课表" : "当日课表"}</h2>
+									{scheduleView === "day" && hasCourses ? (
 										<input
 											className="focus-ring input-surface min-h-11 w-full rounded-xl border border-[color:var(--line)] px-4 py-2 text-sm md:w-auto md:min-w-[230px]"
 											name="courseFilter"
@@ -971,10 +1111,38 @@ export default function Home() {
 											placeholder="输入课程名或教师姓名进行筛选"
 										/>
 									) : null}
+									{scheduleView === "week" ? (
+										<div className="weekly-cache-actions">
+											{weekCacheUpdatedAt ? <span>缓存：{formatCachedAt(weekCacheUpdatedAt)}</span> : null}
+											<button type="button" className="action-btn action-btn--secondary min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold" disabled={loading} onClick={() => void queryCourses(true)}>刷新本周</button>
+											<button type="button" className="action-btn action-btn--quiet min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold" onClick={onClearWeekCache}>清除本地缓存</button>
+										</div>
+									) : null}
 								</div>
 
 								<div className="mt-4 space-y-3">
-									{filteredCourses.length === 0 ? (
+									{scheduleView === "week" ? (
+										hasWeeklyCourses ? (
+											<div className="weekly-schedule-wrap" aria-label="本周课程时间表">
+												<div className="weekly-schedule-grid">
+													<div className="weekly-schedule-corner">节次</div>
+													{weeklyDays.map((day, index) => <div key={day.date} className={`weekly-schedule-day-header ${toDateInput(day.date) === date ? "weekly-schedule-day-header--today" : ""}`} style={{ gridColumn: index + 2 }}><strong>{formatWeekday(day.date)}</strong><span>{toDateInput(day.date).slice(5).replace("-", "/")}</span></div>)}
+													{PERIODS.map((period) => <div key={period.n} className="weekly-schedule-period" style={{ gridRow: period.n + 1 }}><strong>{period.n}</strong><span>{period.t}</span></div>)}
+													{PERIODS.flatMap((period) => weeklyDays.map((day, index) => <div key={`${day.date}-line-${period.n}`} className="weekly-schedule-line" style={{ gridColumn: index + 2, gridRow: period.n + 1 }} />))}
+													{weeklyDays.flatMap((day, dayIndex) => day.courses.map((course) => {
+														const range = getCoursePeriodRange(course);
+														if (!range) return null;
+														const signed = course.signStatus === "1";
+														const courseKey = `${day.date}-${course.id}-${course.uuid}`;
+														const signingThisCourse = signingCourseUuid === course.uuid;
+														return <article key={courseKey} style={{ gridColumn: dayIndex + 2, gridRow: `${range.start + 1} / ${range.end + 2}` }} className={`weekly-grid-course ${signed ? "weekly-grid-course--signed" : "weekly-grid-course--unsigned"}`}>
+															<div className="weekly-grid-course__content"><div><h3>{course.courseName || "--"}</h3><span>{signed ? "已签到" : "未签到"}</span></div><p>{course.classroom || "教室待课表接口提供"}</p><p>{course.teacherName || "--"}</p>{signed ? <button type="button" disabled className="weekly-grid-course__action">已签到</button> : <button type="button" onClick={() => onCourseSign(course)} disabled={loading || signingThisCourse} className="weekly-grid-course__action">{signingThisCourse ? "签到中..." : "点击签到"}</button>}</div>
+														</article>;
+													}))}
+												</div>
+											</div>
+										) : <div className="clay-card rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-raised)] px-4 py-8 text-center text-sm text-[color:var(--green)]"><p>本周暂无课程数据</p>{queryAttempted ? <p className="mt-2 text-xs leading-5 text-[color:var(--muted)]">检查所选日期所在周是否为上课周，并确认学号与密码正确</p> : null}</div>
+									) : filteredCourses.length === 0 ? (
 										<div className="clay-card rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-raised)] px-4 py-8 text-center text-sm text-[color:var(--green)]">
 											<p>当天暂无课程数据</p>
 											{queryAttempted ? <p className="mt-2 text-xs leading-5 text-[color:var(--muted)]">{emptyHelpText}</p> : null}

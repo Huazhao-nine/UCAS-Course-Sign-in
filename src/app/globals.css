@@ -617,6 +617,35 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 	vertical-align: 0.1em;
 }
 
+.schedule-view-switch { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+.schedule-view-switch__option { min-height: 2.35rem; border: 1px solid var(--line-strong); border-radius: 999px; padding: 0.35rem 0.85rem; background: var(--surface-raised); color: var(--muted); font-size: 0.78rem; font-weight: 700; cursor: pointer; }
+.schedule-view-switch__option--active { border-color: var(--accent); background: var(--status-chip-unsigned-bg); color: var(--status-chip-unsigned-text); }
+.schedule-view-switch > span { flex-basis: 100%; color: var(--muted); font-size: 0.72rem; }
+
+.weekly-cache-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
+.weekly-cache-actions > span { width: 100%; color: var(--muted); font-size: 0.7rem; }
+.weekly-schedule-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 0.9rem; background: var(--surface-raised); box-shadow: 0 10px 28px color-mix(in oklab, var(--shadow-soft) 24%, transparent); -webkit-overflow-scrolling: touch; }
+.weekly-schedule-grid { display: grid; min-width: 900px; grid-template-columns: 82px repeat(7, minmax(116px, 1fr)); grid-template-rows: 3.7rem repeat(13, minmax(68px, 1fr)); position: relative; }
+.weekly-schedule-corner, .weekly-schedule-day-header { position: sticky; top: 0; z-index: 4; display: grid; align-content: center; justify-items: center; border-bottom: 1px solid var(--line); background: var(--paper-strong); color: var(--muted); font-size: 0.74rem; }
+.weekly-schedule-corner { grid-column: 1; grid-row: 1; left: 0; z-index: 6; }
+.weekly-schedule-day-header { grid-row: 1; border-left: 1px solid var(--line); }
+.weekly-schedule-day-header strong { color: var(--ink); font-size: 0.88rem; }
+.weekly-schedule-day-header--today { background: color-mix(in oklab, var(--accent-soft) 28%, var(--paper-strong)); }
+.weekly-schedule-period { grid-column: 1; z-index: 2; display: grid; align-content: center; justify-items: center; gap: 0.1rem; border-right: 1px solid var(--line); border-bottom: 1px dashed var(--line); background: color-mix(in oklab, var(--surface-raised) 94%, var(--paper)); color: var(--muted); font-size: 0.64rem; }
+.weekly-schedule-period strong { color: var(--ink); font-size: 0.9rem; }
+.weekly-schedule-line { border-bottom: 1px dashed color-mix(in oklab, var(--line) 78%, transparent); border-left: 1px solid color-mix(in oklab, var(--line) 55%, transparent); background: color-mix(in oklab, var(--surface-raised) 96%, var(--surface)); }
+.weekly-grid-course { z-index: 3; min-width: 0; margin: 0.2rem; }
+.weekly-grid-course__content { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; border: 1px solid; border-radius: 0.65rem; padding: 0.45rem; box-shadow: 0 3px 9px color-mix(in oklab, var(--shadow-soft) 38%, transparent); }
+.weekly-grid-course__content > div { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.25rem; }
+.weekly-grid-course h3 { font-size: 0.75rem; font-weight: 750; line-height: 1.3; overflow-wrap: anywhere; }
+.weekly-grid-course__content span { flex: none; border: 1px solid currentColor; border-radius: 999px; padding: 0.06rem 0.25rem; font-size: 0.55rem; font-weight: 700; }
+.weekly-grid-course p { font-size: 0.63rem; line-height: 1.25; overflow-wrap: anywhere; }
+.weekly-grid-course--unsigned .weekly-grid-course__content { border-color: var(--status-chip-unsigned-border); background: var(--status-chip-unsigned-bg); color: var(--status-chip-unsigned-text); }
+.weekly-grid-course--signed .weekly-grid-course__content { border-color: var(--status-chip-signed-border); background: var(--status-chip-signed-bg); color: var(--status-chip-signed-text); }
+.weekly-grid-course__action { min-height: 1.85rem; border: 1px solid currentColor; border-radius: 0.45rem; padding: 0.2rem 0.4rem; color: inherit; font-size: 0.63rem; font-weight: 700; cursor: pointer; }
+.weekly-grid-course__action { background: color-mix(in oklab, currentColor 12%, transparent); }
+.weekly-grid-course__action:disabled { cursor: not-allowed; opacity: 0.72; }
+
 .daily-schedule-wrap {
 	min-width: 540px;
 	box-shadow: 0 10px 28px color-mix(in oklab, var(--shadow-soft) 28%, transparent);
@@ -751,6 +780,9 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 	.daily-schedule-course {
 		padding: 0.55rem 0.6rem;
 	}
+
+	.weekly-schedule-grid { min-width: 850px; grid-template-columns: 72px repeat(7, minmax(111px, 1fr)); grid-template-rows: 3.45rem repeat(13, minmax(64px, 1fr)); }
+	.weekly-grid-course__content { padding: 0.38rem; }
 
 	.query-toolbar {
 		padding: 0.65rem;
