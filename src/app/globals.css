@@ -634,7 +634,7 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 .weekly-schedule-period { grid-column: 1; z-index: 2; display: grid; align-content: center; justify-items: center; gap: 0.1rem; border-right: 1px solid var(--line); border-bottom: 1px dashed var(--line); background: color-mix(in oklab, var(--surface-raised) 94%, var(--paper)); color: var(--muted); font-size: 0.64rem; }
 .weekly-schedule-period strong { color: var(--ink); font-size: 0.9rem; }
 .weekly-schedule-line { border-bottom: 1px dashed color-mix(in oklab, var(--line) 78%, transparent); border-left: 1px solid color-mix(in oklab, var(--line) 55%, transparent); background: color-mix(in oklab, var(--surface-raised) 96%, var(--surface)); }
-.weekly-grid-course { z-index: 3; min-width: 0; margin: 0.2rem; }
+.weekly-grid-course { position: relative; z-index: 3; min-width: 0; margin: 0.2rem; }
 .weekly-grid-course__content { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between; overflow: hidden; border: 1px solid; border-radius: 0.65rem; padding: 0.45rem; box-shadow: 0 3px 9px color-mix(in oklab, var(--shadow-soft) 38%, transparent); }
 .weekly-grid-course__content > div { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.25rem; }
 .weekly-grid-course h3 { font-size: 0.75rem; font-weight: 750; line-height: 1.3; overflow-wrap: anywhere; }
