@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import { FormEvent, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 
 type CourseItem = {
@@ -39,17 +38,9 @@ type DirectSignResponse = {
 	};
 };
 
-type ThemeMode = "system" | "light" | "dark";
 type StatusKind = "idle" | "loading" | "success" | "error" | "info";
-type FeatureMode = "query" | "manual";
 type ScheduleView = "day" | "week";
 type ToastState = { kind: Exclude<StatusKind, "idle">; message: string };
-
-type RepoStarsCache = {
-	stars: number;
-	repoUpdatedAt: string;
-	updatedAt: number;
-};
 
 type WeekScheduleCache = {
 	weekStart: string;
@@ -57,16 +48,17 @@ type WeekScheduleCache = {
 	days: WeekResponse["days"];
 };
 
-const REPO_STARS_CACHE_KEY = "ucas-repo-stars-cache-v1";
-const REPO_STARS_CACHE_TTL_MS = 1000 * 60 * 30;
+type SavedCredentials = {
+	username: string;
+	password: string;
+};
+
 const WEEK_SCHEDULE_CACHE_PREFIX = "ucas-week-schedule-cache-v1:";
-const AUTO_QR_TTL_MS = 5 * 1000;
-const DOWNLOAD_QR_TTL_MS = 10 * 1000;
+const SAVED_CREDENTIALS_KEY = "ucas-saved-credentials-v1";
 // UCAS 的 get_timestamp.do 与 stu_scan_sign.action 运行在不同服务器上，
 // 两者时钟偏差约 3.5s。校准对齐了 timestamp API，需要减去缓冲才能被 sign API 接受。
 const SIGN_TIMESTAMP_BUFFER_MS = 3 * 1000;
 
-const SIGN_BASE_URL = "https://iclass.ucas.edu.cn:8181/app/course/stu_scan_sign.action";
 const DEFAULT_TEST_USERNAME = (process.env.NEXT_PUBLIC_UCAS_TEST_USERNAME ?? "").trim();
 const DEFAULT_TEST_PASSWORD = process.env.NEXT_PUBLIC_UCAS_TEST_PASSWORD ?? "";
 const PERIODS = [
@@ -84,25 +76,6 @@ const PERIODS = [
 	{ n: 12, t: "20:15-21:00" },
 	{ n: 13, t: "21:05-21:50" }
 ] as const;
-
-type QrSource =
-	| {
-			mode: "query";
-			uuid: string;
-			courseId: string;
-	  }
-	| {
-			mode: "manual";
-			identifier: string;
-	  };
-
-function getSavedThemeMode(): ThemeMode {
-	if (typeof window === "undefined") {
-		return "system";
-	}
-	const saved = window.localStorage.getItem("ucas-theme-mode");
-	return saved === "light" || saved === "dark" || saved === "system" ? saved : "system";
-}
 
 function toYyyyMMdd(dateInput: string): string {
 	return dateInput.replace(/-/g, "");
@@ -160,6 +133,32 @@ function clearWeekScheduleCaches(): void {
 	} catch {}
 }
 
+function readSavedCredentials(): SavedCredentials | null {
+	try {
+		const raw = window.localStorage.getItem(SAVED_CREDENTIALS_KEY);
+		if (!raw) return null;
+		const credentials = JSON.parse(raw) as SavedCredentials;
+		if (typeof credentials.username !== "string" || typeof credentials.password !== "string" || !credentials.username.trim() || !credentials.password) {
+			return null;
+		}
+		return { username: credentials.username.trim(), password: credentials.password };
+	} catch {
+		return null;
+	}
+}
+
+function saveCredentials(username: string, password: string): void {
+	try {
+		window.localStorage.setItem(SAVED_CREDENTIALS_KEY, JSON.stringify({ username: username.trim(), password } satisfies SavedCredentials));
+	} catch {}
+}
+
+function clearSavedCredentials(): void {
+	try {
+		window.localStorage.removeItem(SAVED_CREDENTIALS_KEY);
+	} catch {}
+}
+
 function formatCachedAt(timestamp: number): string {
 	return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit" }).format(timestamp);
 }
@@ -174,19 +173,6 @@ function getTodayInputDate(): string {
 	const now = new Date();
 	const offset = now.getTimezoneOffset() * 60000;
 	return new Date(now.getTime() - offset).toISOString().slice(0, 10);
-}
-
-function formatRepoDate(isoDate: string): string {
-	if (!isoDate) {
-		return "";
-	}
-	const d = new Date(isoDate);
-	if (Number.isNaN(d.getTime())) {
-		return "";
-	}
-	const month = d.getMonth() + 1;
-	const day = d.getDate();
-	return `${month}.${String(day).padStart(2, "0")}`;
 }
 
 function parseClockToMinutes(value: string): number {
@@ -232,51 +218,6 @@ function formatCoursePeriods(course: CourseItem): string {
 	return `${lesson}（${first.t}${first.n === last.n ? "" : `-${last.t.split("-")[1]}`}）`;
 }
 
-function buildSignInUrl(courseId: string, expiresAt: number): string {
-	return `${SIGN_BASE_URL}?courseSchedId=${encodeURIComponent(courseId)}&timestamp=${expiresAt}`;
-}
-
-function buildManualSignInUrl(identifier: string, expiresAt: number): string | null {
-	const raw = identifier.trim();
-	if (!raw) {
-		return null;
-	}
-
-	if (/^\d+$/.test(raw)) {
-		return `${SIGN_BASE_URL}?courseSchedId=${encodeURIComponent(raw)}&timestamp=${expiresAt}`;
-	}
-
-	const compact = raw.replace(/-/g, "");
-	if (/^[0-9a-fA-F]{32}$/.test(compact)) {
-		return `${SIGN_BASE_URL}?timeTableId=${encodeURIComponent(compact.toUpperCase())}&timestamp=${expiresAt}`;
-	}
-
-	return null;
-}
-
-function getSignIdentifierForFilename(signUrl: string, selectedUuid: string): string {
-	if (!signUrl) {
-		return selectedUuid || "unknown";
-	}
-
-	try {
-		const url = new URL(signUrl);
-		const courseSchedId = url.searchParams.get("courseSchedId");
-		if (courseSchedId) {
-			return courseSchedId;
-		}
-
-		const timeTableId = url.searchParams.get("timeTableId");
-		if (timeTableId) {
-			return timeTableId;
-		}
-
-		return selectedUuid || "unknown";
-	} catch {
-		return selectedUuid || "unknown";
-	}
-}
-
 function extractClockTime(value: string): string | null {
 	if (!value) {
 		return null;
@@ -300,70 +241,20 @@ function buildDateTimeFromClock(dateInput: string, clockTime: string | null): Da
 	return parsed;
 }
 
-function readRepoStarsCache(): RepoStarsCache | null {
-	if (typeof window === "undefined") {
-		return null;
-	}
-
-	try {
-		const raw = window.localStorage.getItem(REPO_STARS_CACHE_KEY);
-		if (!raw) {
-			return null;
-		}
-		const parsed = JSON.parse(raw) as RepoStarsCache;
-		if (
-			typeof parsed?.stars !== "number" ||
-			typeof parsed?.updatedAt !== "number" ||
-			typeof parsed?.repoUpdatedAt !== "string"
-		) {
-			return null;
-		}
-		return parsed;
-	} catch {
-		return null;
-	}
-}
-
-function writeRepoStarsCache(stars: number, repoUpdatedAt: string): void {
-	if (typeof window === "undefined") {
-		return;
-	}
-
-	try {
-		const payload: RepoStarsCache = { stars, repoUpdatedAt, updatedAt: Date.now() };
-		window.localStorage.setItem(REPO_STARS_CACHE_KEY, JSON.stringify(payload));
-	} catch {}
-}
-
 export default function Home() {
-	const repoUrl = "https://github.com/lccipher/UCAS-Course-Sign-in";
-	const [themeMode, setThemeMode] = useState<ThemeMode>(getSavedThemeMode);
-	const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
-	const [repoStars, setRepoStars] = useState<number | null>(null);
-	const [repoUpdatedAt, setRepoUpdatedAt] = useState<string>("");
-	const [featureMode, setFeatureMode] = useState<FeatureMode>("query");
 	const [username, setUsername] = useState(DEFAULT_TEST_USERNAME);
 	const [password, setPassword] = useState(DEFAULT_TEST_PASSWORD);
+	const [rememberCredentials, setRememberCredentials] = useState(false);
 	const [date, setDate] = useState(getTodayInputDate);
 	const [keyword, setKeyword] = useState("");
-	const [manualIdentifier, setManualIdentifier] = useState("");
 	const [courses, setCourses] = useState<CourseItem[]>([]);
 	const [weeklyDays, setWeeklyDays] = useState<WeekResponse["days"]>([]);
-	const [scheduleView, setScheduleView] = useState<ScheduleView>("day");
+	const [scheduleView, setScheduleView] = useState<ScheduleView>("week");
 	const [weekCacheUpdatedAt, setWeekCacheUpdatedAt] = useState<number | null>(null);
-	const [selectedUuid, setSelectedUuid] = useState("");
 	const [statusKind, setStatusKind] = useState<StatusKind>("idle");
 	const [toast, setToast] = useState<ToastState | null>(null);
 	const [loading, setLoading] = useState(false);
-	const [manualLoading, setManualLoading] = useState(false);
 	const [signingCourseUuid, setSigningCourseUuid] = useState("");
-	const [signUrl, setSignUrl] = useState("");
-	const [qrDataUrl, setQrDataUrl] = useState("");
-	const [expireAt, setExpireAt] = useState(0);
-	const [expireCountdown, setExpireCountdown] = useState(0);
-	const [qrRelayActive, setQrRelayActive] = useState(false);
-	const [qrSource, setQrSource] = useState<QrSource | null>(null);
-	const qrSectionRef = useRef<HTMLDivElement | null>(null);
 	const toastTimerRef = useRef<number | null>(null);
 
 	const showToast = (kind: StatusKind, message: string) => {
@@ -425,177 +316,25 @@ export default function Home() {
 	}, []);
 
 	useEffect(() => {
+		const saved = readSavedCredentials();
+		if (!saved) return;
+		setUsername(saved.username);
+		setPassword(saved.password);
+		setRememberCredentials(true);
+	}, []);
+
+	useEffect(() => {
+		if (!rememberCredentials || !username.trim() || !password) return;
+		saveCredentials(username, password);
+	}, [rememberCredentials, username, password]);
+
+	useEffect(() => {
 		return () => {
 			if (toastTimerRef.current !== null) {
 				window.clearTimeout(toastTimerRef.current);
 			}
 		};
 	}, []);
-
-	const resetGeneratedSignState = () => {
-		setSelectedUuid("");
-		setSigningCourseUuid("");
-		setSignUrl("");
-		setQrDataUrl("");
-		setExpireAt(0);
-		setExpireCountdown(0);
-		setQrRelayActive(false);
-		setQrSource(null);
-		setToast(null);
-	};
-
-	const getPayloadFromSource = (source: QrSource, deadline: number): string | null => {
-		if (source.mode === "query") {
-			return buildSignInUrl(source.courseId, deadline);
-		}
-		return buildManualSignInUrl(source.identifier, deadline);
-	};
-
-	const generateQrDataUrlFromPayload = async (payload: string): Promise<string> => {
-		const { default: QRCode } = await import("qrcode");
-		return QRCode.toDataURL(payload, {
-			width: 320,
-			margin: 1,
-			errorCorrectionLevel: "M"
-		});
-	};
-
-	const regenerateAutoQr = async (source: QrSource): Promise<boolean> => {
-		const offset = await getServerTimeOffset();
-		const currentTimestamp = Date.now() + offset;
-		// 签到时间戳减去缓冲，弥补 UCAS 两台服务器间的时钟偏差
-		const signTimestamp = currentTimestamp - SIGN_TIMESTAMP_BUFFER_MS;
-		const payload = getPayloadFromSource(source, signTimestamp);
-		if (!payload) {
-			setQrDataUrl("");
-			setSignUrl("");
-			setExpireAt(0);
-			setExpireCountdown(0);
-			return false;
-		}
-
-		try {
-			const imageUrl = await generateQrDataUrlFromPayload(payload);
-			setSignUrl(payload);
-			setExpireAt(currentTimestamp + AUTO_QR_TTL_MS);
-			setQrDataUrl(imageUrl);
-			return true;
-		} catch {
-			setQrDataUrl("");
-			setSignUrl("");
-			setExpireAt(0);
-			setExpireCountdown(0);
-			return false;
-		}
-	};
-
-	useEffect(() => {
-		const media = window.matchMedia("(prefers-color-scheme: dark)");
-
-		const applyTheme = () => {
-			const resolved = themeMode === "system" ? (media.matches ? "dark" : "light") : themeMode;
-			document.documentElement.setAttribute("data-theme", resolved);
-			setResolvedTheme(resolved);
-		};
-
-		applyTheme();
-		const onMediaChange = () => {
-			if (themeMode === "system") {
-				applyTheme();
-			}
-		};
-
-		media.addEventListener("change", onMediaChange);
-		window.localStorage.setItem("ucas-theme-mode", themeMode);
-
-		return () => {
-			media.removeEventListener("change", onMediaChange);
-		};
-	}, [themeMode]);
-
-	useEffect(() => {
-		const controller = new AbortController();
-		const cached = readRepoStarsCache();
-
-		if (cached) {
-			setRepoStars(cached.stars);
-			setRepoUpdatedAt(cached.repoUpdatedAt);
-			if (Date.now() - cached.updatedAt < REPO_STARS_CACHE_TTL_MS) {
-				return () => {
-					controller.abort();
-				};
-			}
-		}
-
-		const loadRepoStars = async () => {
-			try {
-				const res = await fetch("https://api.github.com/repos/lccipher/UCAS-Course-Sign-in", {
-					signal: controller.signal,
-					headers: {
-						Accept: "application/vnd.github+json"
-					}
-				});
-
-				if (!res.ok) {
-					return;
-				}
-
-				const data = (await res.json()) as { stargazers_count?: number; updated_at?: string };
-				if (typeof data.stargazers_count === "number") {
-					setRepoStars(data.stargazers_count);
-					setRepoUpdatedAt(data.updated_at ?? "");
-					writeRepoStarsCache(data.stargazers_count, data.updated_at ?? "");
-				}
-			} catch {}
-		};
-
-		void loadRepoStars();
-
-		return () => {
-			controller.abort();
-		};
-	}, []);
-
-	useEffect(() => {
-		if (!expireAt) {
-			setExpireCountdown(0);
-			return;
-		}
-
-		const updateCountdown = () => {
-			const remainMs = expireAt - (Date.now() + (timeOffsetRef.current?.offset ?? 0));
-			setExpireCountdown(Math.max(0, Math.ceil(remainMs / 1000)));
-		};
-
-		updateCountdown();
-		const timer = window.setInterval(updateCountdown, 250);
-
-		return () => {
-			window.clearInterval(timer);
-		};
-	}, [expireAt]);
-
-	useEffect(() => {
-		if (!qrSource || !expireAt) {
-			return;
-		}
-
-		const delay = Math.max(0, expireAt - (Date.now() + (timeOffsetRef.current?.offset ?? 0)));
-		const timer = window.setTimeout(async () => {
-			const ok = await regenerateAutoQr(qrSource);
-			if (!ok) {
-				if (qrSource.mode === "query") {
-					updateActionStatus("error", "签到码自动刷新失败，请重新选择课程");
-				} else {
-					updateStatus("error", "签到码自动刷新失败，请重新生成");
-				}
-			}
-		}, delay);
-
-		return () => {
-			window.clearTimeout(timer);
-		};
-	}, [qrSource, expireAt]);
 
 	const deferredKeyword = useDeferredValue(keyword);
 
@@ -628,7 +367,6 @@ export default function Home() {
 
 	const hasCourses = courses.length > 0;
 	const hasWeeklyCourses = weeklyDays.some((day) => day.courses.length > 0);
-	const hasQr = Boolean(qrDataUrl);
 	const queryAttempted = statusKind !== "idle";
 	const hasKeyword = keyword.trim().length > 0;
 	const emptyHelpText = hasKeyword ? "可先清空筛选词，再查看全部课程" : "检查日期是否为上课日，并确认学号与密码正确";
@@ -649,12 +387,6 @@ export default function Home() {
 		}
 
 		setLoading(true);
-		setSelectedUuid("");
-		setSignUrl("");
-		setQrDataUrl("");
-		setExpireAt(0);
-		setExpireCountdown(0);
-		setQrSource(null);
 		updateStatus("loading", "正在查询课程…");
 
 		try {
@@ -717,100 +449,25 @@ export default function Home() {
 		updateActionStatus("info", "本地课表缓存已清除；再次查询将访问课表接口");
 	};
 
-	const onManualGenerate = async (event: FormEvent<HTMLFormElement>) => {
-		event.preventDefault();
-		const source: QrSource = { mode: "manual", identifier: manualIdentifier };
-		const payload = getPayloadFromSource(source, Date.now() + (timeOffsetRef.current?.offset ?? 0));
-
-		if (!payload) {
-			updateStatus("error", "请输入纯数字课程ID或32位UUID");
+	const onRememberCredentialsChange = (checked: boolean) => {
+		setRememberCredentials(checked);
+		if (!checked) {
+			clearSavedCredentials();
+			updateActionStatus("info", "已清除本机保存的账号和密码");
 			return;
 		}
-
-		setManualLoading(true);
-		setSelectedUuid("");
-		setQrSource(source);
-
-		let ok = false;
-		try {
-			ok = await regenerateAutoQr(source);
-		} finally {
-			setManualLoading(false);
-		}
-
-		if (!ok) {
-			updateStatus("error", "签到码生成失败，请检查课程ID或UUID后重试");
-			return;
-		}
-
-		updateStatus("success", "签到码已生成（5秒后自动刷新）");
-
-		if (window.matchMedia("(max-width: 1023px)").matches) {
-			setQrRelayActive(true);
-			window.setTimeout(() => setQrRelayActive(false), 1200);
-			window.requestAnimationFrame(() => {
-				qrSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-			});
+		if (username.trim() && password) {
+			saveCredentials(username, password);
+			updateActionStatus("info", "账号和密码将仅保存在当前浏览器中");
 		}
 	};
 
-	const onDownloadQr = async () => {
-		if (!qrSource) {
-			return;
-		}
-
-		const offset = await getServerTimeOffset();
-		const deadline = Date.now() + offset + DOWNLOAD_QR_TTL_MS;
-		const payload = getPayloadFromSource(qrSource, deadline);
-		if (!payload) {
-			if (featureMode === "query") {
-				updateActionStatus("error", "下载二维码失败，请重新生成签到码");
-				return;
-			}
-			updateStatus("error", "下载二维码失败，请重新生成签到码");
-			return;
-		}
-
-		try {
-			const imageUrl = await generateQrDataUrlFromPayload(payload);
-			const link = document.createElement("a");
-			link.href = imageUrl;
-			const safeIdentifier = getSignIdentifierForFilename(payload, selectedUuid);
-			link.download = `ucas-signin-${safeIdentifier}-${deadline}.png`;
-			link.click();
-			if (featureMode === "query") {
-				updateActionStatus("success", "二维码已开始下载（10秒有效）");
-				return;
-			}
-			updateStatus("success", "二维码已开始下载（10秒有效）");
-		} catch {
-			if (featureMode === "query") {
-				updateActionStatus("error", "下载二维码失败，请稍后重试");
-				return;
-			}
-			updateStatus("error", "下载二维码失败，请稍后重试");
-		}
-	};
-
-	const onCopySignUrl = async () => {
-		if (!signUrl) {
-			return;
-		}
-
-		try {
-			await navigator.clipboard.writeText(signUrl);
-			if (featureMode === "query") {
-				updateActionStatus("info", "已复制签到链接");
-				return;
-			}
-			updateStatus("info", "已复制签到链接");
-		} catch {
-			if (featureMode === "query") {
-				updateActionStatus("error", "复制签到链接失败，请手动复制");
-				return;
-			}
-			updateStatus("error", "复制签到链接失败，请手动复制");
-		}
+	const onClearSavedCredentials = () => {
+		clearSavedCredentials();
+		setRememberCredentials(false);
+		setUsername("");
+		setPassword("");
+		updateActionStatus("info", "已清除本机保存的账号和密码");
 	};
 
 	const refreshCoursesAfterSign = async (): Promise<{ ok: true; total: number } | { ok: false }> => {
@@ -913,10 +570,6 @@ export default function Home() {
 		}
 	};
 
-	const onToggleTheme = () => {
-		setThemeMode(resolvedTheme === "dark" ? "light" : "dark");
-	};
-
 	return (
 		<>
 			<div className="grain flex min-h-screen flex-col px-4 py-7 sm:px-10">
@@ -927,97 +580,17 @@ export default function Home() {
 							<button type="button" onClick={() => setToast(null)} aria-label="关闭提示">×</button>
 						</div>
 					) : null}
-					<header className="mb-7">
-						<a href="#main-content" className="sr-only focus:not-sr-only skip-link">
-							跳到主要内容
-						</a>
-						<div className="mt-4">
-							<h1 className="max-w-4xl font-[var(--font-serif)] text-3xl leading-tight font-semibold sm:text-5xl">
-								UCAS Course Sign in
-							</h1>
-						</div>
-						<p className="mt-4 text-sm leading-7 sm:text-base">
-							查询当天或本周课程后，可直接在课表中完成签到。也可以手动输入课程ID或UUID生成签到码。
-						</p>
-						<div className="utility-toolbar mt-4 flex flex-wrap items-center gap-2.5">
-							<div className="repo-link-group inline-flex min-h-11 items-stretch">
-								<a
-									href={repoUrl}
-									target="_blank"
-									rel="noreferrer"
-									className="repo-link-main inline-flex min-h-11 items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold sm:text-sm"
-									aria-label="查看 GitHub 仓库"
-									title="查看 GitHub 仓库"
-								>
-									<svg aria-hidden="true" viewBox="0 0 16 16" className="h-4 w-4 fill-current">
-										<path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.01.08-2.1 0 0 .67-.21 2.2.82a7.55 7.55 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.09.16 1.9.08 2.1.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
-									</svg>
-									<span>GitHub</span>
-									<svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4 fill-current">
-										<path d="m10 1.5 2.42 4.9 5.4.78-3.9 3.8.92 5.37L10 13.9l-4.84 2.55.92-5.37-3.9-3.8 5.4-.78L10 1.5Z" />
-									</svg>
-									<span className="numeric-tabular">
-										{repoStars !== null ? repoStars.toLocaleString() : "--"}
-									</span>
-									<svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4 fill-current">
-										<path
-											fillRule="evenodd"
-											d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 0 0 0-1.5h-3.25V5Z"
-											clipRule="evenodd"
-										/>
-									</svg>
-									<span className="numeric-tabular">{formatRepoDate(repoUpdatedAt)}</span>
-								</a>
-							</div>
-							<button
-								type="button"
-								onClick={onToggleTheme}
-								className="theme-toggle-compact inline-flex min-h-11 items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-semibold sm:text-sm"
-								aria-pressed={resolvedTheme === "dark"}
-								aria-label={resolvedTheme === "dark" ? "切换到亮色模式" : "切换到暗色模式"}
-								title={resolvedTheme === "dark" ? "切换到亮色模式" : "切换到暗色模式"}
-							>
-								<svg aria-hidden="true" viewBox="0 0 24 24" className="h-4 w-4 fill-current">
-									{resolvedTheme === "dark" ? (
-										<path d="M12 3a1 1 0 0 1 1 1v1.2a1 1 0 1 1-2 0V4a1 1 0 0 1 1-1Zm0 14.8a1 1 0 0 1 1 1V20a1 1 0 1 1-2 0v-1.2a1 1 0 0 1 1-1Zm8-5.8a1 1 0 0 1 1 1 1 1 0 0 1-1 1h-1.2a1 1 0 1 1 0-2H20ZM5.2 12a1 1 0 1 1 0 2H4a1 1 0 1 1 0-2h1.2Zm11.2-5.66a1 1 0 0 1 1.42 0l.85.85a1 1 0 1 1-1.41 1.42l-.86-.85a1 1 0 0 1 0-1.42Zm-10.24 0a1 1 0 0 1 1.42 1.42l-.86.85A1 1 0 0 1 5.33 7.2l.85-.85Zm11.39 10.24.85.85a1 1 0 1 1-1.41 1.42l-.86-.85a1 1 0 1 1 1.42-1.42Zm-10.24 0a1 1 0 0 1 0 1.42l-.86.85a1 1 0 1 1-1.41-1.42l.85-.85a1 1 0 0 1 1.42 0ZM12 7a5 5 0 1 1 0 10 5 5 0 0 1 0-10Z" />
-									) : (
-										<path d="M21.75 15.08a.75.75 0 0 0-.95-.46 8.23 8.23 0 0 1-2.62.43 8.24 8.24 0 0 1-8.23-8.23c0-.9.14-1.77.43-2.62a.75.75 0 0 0-.95-.95A9.75 9.75 0 1 0 21.3 16.03a.75.75 0 0 0 .45-.95Z" />
-									)}
-								</svg>
-								<span>{resolvedTheme === "dark" ? "切换亮色" : "切换暗色"}</span>
-							</button>
-						</div>
-						<div className="mt-4 flex flex-wrap gap-2">
-							<button
-								type="button"
-								onClick={() => {
-									resetGeneratedSignState();
-									setFeatureMode("query");
-									updateStatus("idle", "输入学号、密码和日期，开始查询课程");
-								}}
-								className={`action-btn min-h-11 rounded-lg px-3.5 py-2 text-xs font-semibold sm:text-sm ${
-									featureMode === "query" ? "action-btn--primary" : "action-btn--secondary"
-								}`}
-							>
-								查询课程模式
-							</button>
-							<button
-								type="button"
-								onClick={() => {
-									resetGeneratedSignState();
-									setFeatureMode("manual");
-									updateStatus("idle", "输入课程ID或UUID，直接生成签到码");
-								}}
-								className={`action-btn min-h-11 rounded-lg px-3.5 py-2 text-xs font-semibold sm:text-sm ${
-									featureMode === "manual" ? "action-btn--primary" : "action-btn--secondary"
-								}`}
-							>
-								手动生成模式
-							</button>
-						</div>
-					</header>
+						<header className="mb-5">
+							<a href="#main-content" className="sr-only focus:not-sr-only skip-link">
+								跳到主要内容
+							</a>
+							{/* <div className="mt-4">
+								<h1 className="max-w-4xl font-[var(--font-serif)] text-3xl leading-tight font-semibold sm:text-5xl">
+									UCAS Course Sign in
+								</h1>
+							</div> */}
+						</header>
 
-					{featureMode === "query" ? (
 						<section
 							id="main-content"
 							className="panel query-workspace rounded-2xl p-5 sm:p-6"
@@ -1025,12 +598,21 @@ export default function Home() {
 							<form onSubmit={onSubmit}>
 								<div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
 									<div>
-										<h2 className="font-[var(--font-serif)] text-2xl font-semibold">查询课程</h2>
-									<p className="text-xs tracking-[0.08em] uppercase text-[color:var(--green)]">
-										学号和密码仅用于本次查询，不会存储
-									</p>
+											<h2 className="font-[var(--font-serif)] text-2xl font-semibold">查询本周课表</h2>
+									{/* <p className="text-xs tracking-[0.08em] uppercase text-[color:var(--green)]">
+												默认查询当前日期所在周；可在下方选择仅在本机浏览器保存
+									</p> */}
 									</div>
 								</div>
+								{/* <div className="usage-disclaimer mt-4" role="note" aria-label="使用声明与本机凭据提示">
+									<svg aria-hidden="true" viewBox="0 0 24 24">
+										<path d="M12 8.25v4.5m0 3h.008M10.03 3.36 2.67 16.1A2.25 2.25 0 0 0 4.62 19.5h14.76a2.25 2.25 0 0 0 1.95-3.4L13.97 3.36a2.25 2.25 0 0 0-3.94 0Z" />
+									</svg>
+									<div>
+										<strong>使用声明</strong>
+										<p>开启“记住”后，账号和密码会以浏览器本地存储保存（未额外加密），可随时清除。</p>
+									</div>
+								</div> */}
 
 								<div className="query-toolbar mt-4 grid gap-3 md:grid-cols-[minmax(150px,1fr)_minmax(150px,1fr)_minmax(150px,0.8fr)_auto] md:items-end">
 									<label className="block text-sm font-semibold">
@@ -1079,7 +661,7 @@ export default function Home() {
 												今天
 											</button>
 										</div>
-										<span className="date-hint">当前查询：{date}</span>
+										{/* <span className="date-hint">当前查询：{date}</span> */}
 									</label>
 
 									<button
@@ -1087,13 +669,29 @@ export default function Home() {
 										className="action-btn action-btn--primary min-h-11 w-full rounded-xl px-5 py-2.5 text-sm font-semibold md:w-auto"
 										type="submit"
 									>
-										{loading ? "查询中..." : "查询课程"}
+											{loading ? "查询中..." : scheduleView === "week" ? "查询本周课表" : "查询当天课程"}
 									</button>
 								</div>
+								<div className="credential-storage" aria-live="polite">
+									<label className="credential-storage__toggle">
+										<input
+											type="checkbox"
+											checked={rememberCredentials}
+											onChange={(event) => onRememberCredentialsChange(event.target.checked)}
+										/>
+										<span>在这台设备记住账号和密码</span>
+									</label>
+									{rememberCredentials ? (
+										<button type="button" onClick={onClearSavedCredentials} className="credential-storage__clear">
+											清除本机保存信息
+										</button>
+									) : null}
+									{/* <p>只适用于你本人可控制的浏览器；清除浏览器网站数据也会移除已保存信息。</p> */}
+								</div>
 								<div className="schedule-view-switch mt-3" role="group" aria-label="课表查询范围">
-									<button type="button" onClick={() => { setScheduleView("day"); setCourses([]); setWeeklyDays([]); setWeekCacheUpdatedAt(null); updateStatus("idle", "将查询选定日期当天的课程"); }} className={scheduleView === "day" ? "schedule-view-switch__option schedule-view-switch__option--active" : "schedule-view-switch__option"} aria-pressed={scheduleView === "day"}>当日课表</button>
-									<button type="button" onClick={() => { setScheduleView("week"); setCourses([]); setWeeklyDays([]); setWeekCacheUpdatedAt(null); updateStatus("idle", "将查询选定日期所在周（周一至周日）的课程"); }} className={scheduleView === "week" ? "schedule-view-switch__option schedule-view-switch__option--active" : "schedule-view-switch__option"} aria-pressed={scheduleView === "week"}>本周课表</button>
-									<span>{scheduleView === "week" ? "一次登录查询周一至周日" : "仅查询所选日期"}</span>
+										<button type="button" onClick={() => { setScheduleView("week"); setCourses([]); setWeeklyDays([]); setWeekCacheUpdatedAt(null); updateStatus("idle", "将查询选定日期所在周（周一至周日）的课程"); }} className={scheduleView === "week" ? "schedule-view-switch__option schedule-view-switch__option--active" : "schedule-view-switch__option"} aria-pressed={scheduleView === "week"}>本周课表</button>
+										<button type="button" onClick={() => { setScheduleView("day"); setCourses([]); setWeeklyDays([]); setWeekCacheUpdatedAt(null); updateStatus("idle", "将查询选定日期当天的课程"); }} className={scheduleView === "day" ? "schedule-view-switch__option schedule-view-switch__option--active" : "schedule-view-switch__option"} aria-pressed={scheduleView === "day"}>当日课表</button>
+										{/* <span>{scheduleView === "week" ? "默认查询当前日期所在周（周一至周日）" : "仅查询所选日期"}</span> */}
 								</div>
 
 							</form>
@@ -1136,7 +734,7 @@ export default function Home() {
 														const courseKey = `${day.date}-${course.id}-${course.uuid}`;
 														const signingThisCourse = signingCourseUuid === course.uuid;
 														return <article key={courseKey} style={{ gridColumn: dayIndex + 2, gridRow: `${range.start + 1} / ${range.end + 2}` }} className={`weekly-grid-course ${signed ? "weekly-grid-course--signed" : "weekly-grid-course--unsigned"}`}>
-															<div className="weekly-grid-course__content"><div><h3>{course.courseName || "--"}</h3><span>{signed ? "已签到" : "未签到"}</span></div><p>{course.classroom || "教室待课表接口提供"}</p><p>{course.teacherName || "--"}</p>{signed ? <button type="button" disabled className="weekly-grid-course__action">已签到</button> : <button type="button" onClick={() => onCourseSign(course)} disabled={loading || signingThisCourse} className="weekly-grid-course__action">{signingThisCourse ? "签到中..." : "点击签到"}</button>}</div>
+															<div className="weekly-grid-course__content"><div><h3 title={course.courseName || ""}>{course.courseName || "--"}</h3><span>{signed ? "已签到" : "未签到"}</span></div><p>{course.classroom || "教室待课表接口提供"}</p><p>{course.teacherName || "--"}</p>{signed ? <button type="button" disabled className="weekly-grid-course__action">已签到</button> : <button type="button" onClick={() => onCourseSign(course)} disabled={loading || signingThisCourse} className="weekly-grid-course__action">{signingThisCourse ? "签到中..." : "点击签到"}</button>}</div>
 														</article>;
 													}))}
 												</div>
@@ -1150,8 +748,8 @@ export default function Home() {
 									) : (
 										<div className="daily-schedule-wrap overflow-x-auto rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-raised)]">
 											<div className="daily-schedule-header">
-												<span>节次 / 时间</span>
-												<span>{date} 当日课程</span>
+												<span>节次</span>
+												{/* <span>{date} 当日课程</span> */}
 											</div>
 											<div className="daily-schedule-grid">
 												{PERIODS.map((period) => (
@@ -1180,95 +778,8 @@ export default function Home() {
 
 								</div>
 							</div>
-						</section>
-					) : (
-						<section
-							id="main-content"
-							className="grid items-start gap-5 xl:grid-cols-[minmax(320px,380px)_minmax(0,1fr)] 2xl:grid-cols-[minmax(340px,400px)_minmax(0,1fr)]"
-						>
-							<form onSubmit={onManualGenerate} className="panel rounded-2xl p-5 sm:p-6">
-								<div className="space-y-1">
-									<h2 className="font-[var(--font-serif)] text-2xl font-semibold">手动生成签到码</h2>
-									<p className="text-xs tracking-[0.08em] uppercase text-[color:var(--green)]">
-										课程ID为7位纯数字，UUID为32位十六进制字符串
-									</p>
-								</div>
-
-								<div className="mt-6 space-y-4">
-									<label className="block text-sm font-semibold">
-										课程ID / UUID
-										<input
-											className="focus-ring input-surface mt-2 w-full rounded-xl border border-[color:var(--line)] px-4 py-2.5"
-											name="manualCourseIdentifier"
-											value={manualIdentifier}
-											onChange={(e) => setManualIdentifier(e.target.value)}
-											placeholder="1203879 / EFD843630CE444769921BDDCD05298C7"
-											autoComplete="off"
-											spellCheck={false}
-											required
-										/>
-									</label>
-
-									<button
-										disabled={manualLoading}
-										className="action-btn action-btn--primary w-full rounded-xl px-4 py-3 text-sm font-semibold"
-										type="submit"
-									>
-										{manualLoading ? "生成中..." : "生成签到码"}
-									</button>
-								</div>
-
-							</form>
-
-							<div
-								ref={qrSectionRef}
-								className={`render-skip clay-card rounded-xl border border-[color:var(--line)] bg-[color:var(--surface)] p-4 ${
-									qrRelayActive ? "relay-highlight" : ""
-								}`}
-							>
-								{hasQr ? (
-									<div className="grid gap-4 lg:grid-cols-[220px_1fr] lg:items-center">
-										<Image
-											src={qrDataUrl}
-											alt="签到码"
-											width={220}
-											height={220}
-											unoptimized
-											className="w-[220px] max-w-full rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-raised)] p-2"
-										/>
-										<div className="space-y-3 text-sm numeric-tabular">
-											<p>
-												刷新倒计时：
-												<span className="font-semibold">{expireCountdown}s</span>
-											</p>
-											<p className="break-all font-mono text-xs leading-6 text-[color:var(--muted)]">
-												{signUrl}
-											</p>
-											<div className="flex flex-wrap gap-2">
-												<button
-													type="button"
-													onClick={onDownloadQr}
-													className="action-btn action-btn--secondary min-h-11 rounded-lg px-3.5 py-2 text-xs font-semibold"
-												>
-													下载二维码
-												</button>
-												<button
-													type="button"
-													onClick={onCopySignUrl}
-													className="action-btn action-btn--quiet min-h-11 rounded-lg px-3.5 py-2 text-xs font-semibold"
-												>
-													复制签到链接
-												</button>
-											</div>
-										</div>
-									</div>
-								) : (
-									<p className="text-sm text-center text-[color:var(--green)]">暂无签到码数据</p>
-								)}
-							</div>
-						</section>
-					)}
-				</main>
+							</section>
+					</main>
 			</div>
 		</>
 	);
