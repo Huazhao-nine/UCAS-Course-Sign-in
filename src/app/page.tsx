@@ -12,10 +12,6 @@ type CourseItem = {
 	classBeginTime: string;
 	classEndTime: string;
 	signStatus: string;
-	weekProgress?: {
-		current: number;
-		total: number;
-	};
 	scheduleDate?: string;
 };
 
@@ -57,7 +53,7 @@ type SavedCredentials = {
 	password: string;
 };
 
-const WEEK_SCHEDULE_CACHE_PREFIX = "ucas-week-schedule-cache-v2:";
+const WEEK_SCHEDULE_CACHE_PREFIX = "ucas-week-schedule-cache-v1:";
 const SAVED_CREDENTIALS_KEY = "ucas-saved-credentials-v1";
 // UCAS 的 get_timestamp.do 与 stu_scan_sign.action 运行在不同服务器上，
 // 两者时钟偏差约 3.5s。校准对齐了 timestamp API，需要减去缓冲才能被 sign API 接受。
@@ -220,14 +216,6 @@ function formatCoursePeriods(course: CourseItem): string {
 	const last = PERIODS[range.end - 1];
 	const lesson = first.n === last.n ? `第 ${first.n} 节` : `第 ${first.n}-${last.n} 节`;
 	return `${lesson}（${first.t}${first.n === last.n ? "" : `-${last.t.split("-")[1]}`}）`;
-}
-
-function formatCourseWeekProgress(course: CourseItem): string | null {
-	const progress = course.weekProgress;
-	if (!progress || !Number.isInteger(progress.current) || !Number.isInteger(progress.total) || progress.current < 1 || progress.total < progress.current) {
-		return null;
-	}
-	return `${progress.current}/${progress.total} 周`;
 }
 
 function extractClockTime(value: string): string | null {
@@ -743,11 +731,10 @@ export default function Home() {
 														const range = getCoursePeriodRange(course);
 														if (!range) return null;
 														const signed = course.signStatus === "1";
-																const weekProgress = formatCourseWeekProgress(course);
 														const courseKey = `${day.date}-${course.id}-${course.uuid}`;
 														const signingThisCourse = signingCourseUuid === course.uuid;
 														return <article key={courseKey} style={{ gridColumn: dayIndex + 2, gridRow: `${range.start + 1} / ${range.end + 2}` }} className={`weekly-grid-course ${signed ? "weekly-grid-course--signed" : "weekly-grid-course--unsigned"}`}>
-																	<div className="weekly-grid-course__content"><div className="weekly-grid-course__heading"><h3 title={course.courseName || ""}>{course.courseName || "--"}</h3><div className="weekly-grid-course__badges"><span>{signed ? "已签到" : "未签到"}</span>{weekProgress ? <span className="course-week-progress" aria-label={`课程进度：第 ${weekProgress}`}>{weekProgress}</span> : null}</div></div><p>{course.classroom || "教室待课表接口提供"}</p><p>{course.teacherName || "--"}</p>{signed ? <button type="button" disabled className="weekly-grid-course__action">已签到</button> : <button type="button" onClick={() => onCourseSign(course)} disabled={loading || signingThisCourse} className="weekly-grid-course__action">{signingThisCourse ? "签到中..." : "点击签到"}</button>}</div>
+															<div className="weekly-grid-course__content"><div><h3 title={course.courseName || ""}>{course.courseName || "--"}</h3><span>{signed ? "已签到" : "未签到"}</span></div><p>{course.classroom || "教室待课表接口提供"}</p><p>{course.teacherName || "--"}</p>{signed ? <button type="button" disabled className="weekly-grid-course__action">已签到</button> : <button type="button" onClick={() => onCourseSign(course)} disabled={loading || signingThisCourse} className="weekly-grid-course__action">{signingThisCourse ? "签到中..." : "点击签到"}</button>}</div>
 														</article>;
 													}))}
 												</div>
@@ -774,11 +761,10 @@ export default function Home() {
 												{PERIODS.map((period) => <div key={`line-${period.n}`} className="daily-schedule-line" style={{ gridRow: period.n }} />)}
 												{dailySchedule.scheduled.map(({ course, range }) => {
 													const signed = course.signStatus === "1";
-															const weekProgress = formatCourseWeekProgress(course);
 													const signingThisCourse = signingCourseUuid === course.uuid;
 													return (
 														<article key={`${course.id}-${course.uuid}`} style={{ gridRow: `${range.start} / ${range.end + 1}` }} className={`daily-schedule-course ${signed ? "daily-schedule-course--signed" : "daily-schedule-course--unsigned"}`}>
-																	<div className="daily-schedule-course__heading"><h3>{course.courseName || "--"}</h3><div className="daily-schedule-course__badges"><span>{signed ? "已签到" : "未签到"}</span>{weekProgress ? <span className="course-week-progress" aria-label={`课程进度：第 ${weekProgress}`}>{weekProgress}</span> : null}</div></div>
+															<div className="flex items-start justify-between gap-2"><h3>{course.courseName || "--"}</h3><span>{signed ? "已签到" : "未签到"}</span></div>
 															<p>{course.teacherName || "--"} · {course.classroom || "教室待课表接口提供"}</p>
 															<p>{formatCoursePeriods(course)}</p>
 															<button type="button" onClick={() => onCourseSign(course)} disabled={loading || signed || signingThisCourse} className="action-btn action-btn--primary mt-3 min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60">{signingThisCourse ? "签到中..." : signed ? "已签到" : "签到"}</button>
