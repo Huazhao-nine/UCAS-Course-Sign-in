@@ -17,6 +17,7 @@ type LoginResponse = {
 type CourseItem = {
 	id?: string;
 	uuid?: string;
+	courseId?: string;
 	courseName?: string;
 	teacherName?: string;
 	classroom?: string;
@@ -423,6 +424,7 @@ function sanitizeCourse(item: CourseItem, scheduleDate: string) {
 	return {
 		id: item.id ?? "",
 		uuid: item.uuid ?? "",
+		courseId: item.courseId ?? "",
 		courseName: item.courseName ?? "",
 		teacherName: item.teacherName ?? "",
 		classroom,
