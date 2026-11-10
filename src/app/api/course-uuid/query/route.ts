@@ -30,6 +30,47 @@ type CourseItem = {
 	classBeginTime?: string;
 	classEndTime?: string;
 	signStatus?: string;
+	// iClass 在不同学期/版本中使用的周次字段并不完全一致，下面的字段
+	// 仅用于提取明确的“当前周/总周数”，不会原样暴露给客户端。
+	currentWeek?: unknown;
+	currentWeekNo?: unknown;
+	currentWeekNum?: unknown;
+	weekNo?: unknown;
+	weekNum?: unknown;
+	weekNumber?: unknown;
+	teachingWeek?: unknown;
+	teachingWeekNo?: unknown;
+	termWeek?: unknown;
+	termWeekNo?: unknown;
+	courseCurrentWeek?: unknown;
+	totalWeeks?: unknown;
+	totalWeek?: unknown;
+	totalWeekNum?: unknown;
+	totalWeekCount?: unknown;
+	courseTotalWeeks?: unknown;
+	courseWeekCount?: unknown;
+	weekTotal?: unknown;
+	weekCount?: unknown;
+	startWeek?: unknown;
+	startWeekNo?: unknown;
+	endWeek?: unknown;
+	endWeekNo?: unknown;
+	weekProgress?: unknown;
+	courseProgress?: unknown;
+	weekRange?: unknown;
+	courseWeekRange?: unknown;
+	courseWeeks?: unknown;
+	weeks?: unknown;
+	courseWeek?: unknown;
+	teachingWeeks?: unknown;
+	courseStartDate?: unknown;
+	courseEndDate?: unknown;
+	teachingStartDate?: unknown;
+	teachingEndDate?: unknown;
+	classStartDate?: unknown;
+	classEndDate?: unknown;
+	schedStartDate?: unknown;
+	schedEndDate?: unknown;
 };
 
 type ScheduleResponse = {
@@ -236,7 +277,138 @@ function buildLoginBody(username: string, password: string): string {
 	return body.toString();
 }
 
-function sanitizeCourse(item: CourseItem) {
+type WeekProgress = {
+	current: number;
+	total: number;
+};
+
+const CURRENT_WEEK_FIELDS: ReadonlyArray<keyof CourseItem> = [
+	"currentWeek",
+	"currentWeekNo",
+	"currentWeekNum",
+	"weekNo",
+	"weekNum",
+	"weekNumber",
+	"teachingWeek",
+	"teachingWeekNo",
+	"termWeek",
+	"termWeekNo",
+	"courseCurrentWeek"
+];
+const TOTAL_WEEK_FIELDS: ReadonlyArray<keyof CourseItem> = [
+	"totalWeeks",
+	"totalWeek",
+	"totalWeekNum",
+	"totalWeekCount",
+	"courseTotalWeeks",
+	"courseWeekCount",
+	"weekTotal",
+	"weekCount",
+	"endWeek",
+	"endWeekNo"
+];
+const WEEK_TEXT_FIELDS: ReadonlyArray<keyof CourseItem> = [
+	"weekProgress",
+	"courseProgress",
+	"weekRange",
+	"courseWeekRange",
+	"courseWeeks",
+	"weeks",
+	"courseWeek",
+	"teachingWeeks"
+];
+const START_DATE_FIELDS: ReadonlyArray<keyof CourseItem> = ["courseStartDate", "teachingStartDate", "classStartDate", "schedStartDate"];
+const END_DATE_FIELDS: ReadonlyArray<keyof CourseItem> = ["courseEndDate", "teachingEndDate", "classEndDate", "schedEndDate"];
+
+function toWeekNumber(value: unknown): number | null {
+	if (typeof value !== "number" && typeof value !== "string") return null;
+	const text = String(value).trim();
+	if (!/^\d{1,2}$/.test(text)) return null;
+	const parsed = Number(text);
+	return parsed >= 1 && parsed <= 40 ? parsed : null;
+}
+
+function readFirstWeekNumber(item: CourseItem, fields: ReadonlyArray<keyof CourseItem>): number | null {
+	for (const field of fields) {
+		const parsed = toWeekNumber(item[field]);
+		if (parsed !== null) return parsed;
+	}
+	return null;
+}
+
+function toCompactDate(value: unknown): string | null {
+	if (typeof value !== "string" && typeof value !== "number") return null;
+	const matched = String(value).match(/(\d{4})\D?(\d{1,2})\D?(\d{1,2})/);
+	if (!matched) return null;
+	const [, year, month, day] = matched;
+	const compact = `${year}${month.padStart(2, "0")}${day.padStart(2, "0")}`;
+	const parsed = new Date(`${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}T12:00:00`);
+	return Number.isNaN(parsed.getTime()) ? null : compact;
+}
+
+function getMondayEpochDay(compactDate: string): number {
+	const value = new Date(`${compactDate.slice(0, 4)}-${compactDate.slice(4, 6)}-${compactDate.slice(6, 8)}T12:00:00`);
+	value.setDate(value.getDate() - ((value.getDay() + 6) % 7));
+	return Math.floor(value.getTime() / (24 * 60 * 60 * 1000));
+}
+
+function buildWeekProgress(current: number | null, total: number | null): WeekProgress | null {
+	if (current === null || total === null || current > total) return null;
+	return { current, total };
+}
+
+function parseWeekProgressText(value: unknown): WeekProgress | null {
+	if (typeof value !== "string" && typeof value !== "number") return null;
+	const text = String(value).trim();
+	// 只接受明确的进度格式，例如“17/20 周”或“第17周，共20周”。
+	const slash = text.match(/(?:第\s*)?(\d{1,2})\s*[\/／]\s*(\d{1,2})\s*周?/);
+	if (slash) return buildWeekProgress(toWeekNumber(slash[1]), toWeekNumber(slash[2]));
+	const labeled = text.match(/第\s*(\d{1,2})\s*周[^\d]{0,12}(?:共|总计|共计)\s*(\d{1,2})\s*周/);
+	if (labeled) return buildWeekProgress(toWeekNumber(labeled[1]), toWeekNumber(labeled[2]));
+	return null;
+}
+
+function parseTotalFromWeekRange(value: unknown): number | null {
+	if (typeof value !== "string" && typeof value !== "number") return null;
+	const text = String(value).trim();
+	const matched = text.match(/(?:第\s*)?\d{1,2}\s*(?:-|－|—|至|到|~|～)\s*(\d{1,2})\s*周?/);
+	return matched ? toWeekNumber(matched[1]) : null;
+}
+
+function getProgressFromDates(item: CourseItem, scheduleDate: string): WeekProgress | null {
+	const start = START_DATE_FIELDS.map((field) => toCompactDate(item[field])).find((value): value is string => value !== null);
+	const end = END_DATE_FIELDS.map((field) => toCompactDate(item[field])).find((value): value is string => value !== null);
+	if (!start || !end) return null;
+
+	const startMonday = getMondayEpochDay(start);
+	const endMonday = getMondayEpochDay(end);
+	const currentMonday = getMondayEpochDay(scheduleDate);
+	if (endMonday <= startMonday || currentMonday < startMonday || currentMonday > endMonday) return null;
+	return buildWeekProgress(Math.floor((currentMonday - startMonday) / 7) + 1, Math.floor((endMonday - startMonday) / 7) + 1);
+}
+
+function getCourseWeekProgress(item: CourseItem, scheduleDate: string): WeekProgress | null {
+	const current = readFirstWeekNumber(item, CURRENT_WEEK_FIELDS);
+	const explicit = buildWeekProgress(current, readFirstWeekNumber(item, TOTAL_WEEK_FIELDS));
+	if (explicit) return explicit;
+
+	for (const field of WEEK_TEXT_FIELDS) {
+		const parsed = parseWeekProgressText(item[field]);
+		if (parsed) return parsed;
+	}
+
+	if (current !== null) {
+		for (const field of WEEK_TEXT_FIELDS) {
+			const total = parseTotalFromWeekRange(item[field]);
+			const parsed = buildWeekProgress(current, total);
+			if (parsed) return parsed;
+		}
+	}
+
+	return getProgressFromDates(item, scheduleDate);
+}
+
+function sanitizeCourse(item: CourseItem, scheduleDate: string) {
 	const locationFields = [
 		item.classroom,
 		item.classRoom,
@@ -257,7 +429,8 @@ function sanitizeCourse(item: CourseItem) {
 		weekDay: item.weekDay ?? "",
 		classBeginTime: item.classBeginTime ?? "",
 		classEndTime: item.classEndTime ?? "",
-		signStatus: item.signStatus ?? ""
+		signStatus: item.signStatus ?? "",
+		weekProgress: getCourseWeekProgress(item, scheduleDate) ?? undefined
 	};
 }
 
@@ -402,7 +575,7 @@ export async function POST(req: NextRequest) {
 			const dates = getWeekDates(date);
 			const days = [];
 			for (const targetDate of dates) {
-				const courses = (await fetchSchedule(targetDate, true)).map(sanitizeCourse);
+				const courses = (await fetchSchedule(targetDate, true)).map((course) => sanitizeCourse(course, targetDate));
 				days.push({ date: targetDate, courses });
 			}
 			return jsonWithHeaders(
@@ -411,7 +584,7 @@ export async function POST(req: NextRequest) {
 			);
 		}
 
-		const courses = (await fetchSchedule(date)).map(sanitizeCourse);
+		const courses = (await fetchSchedule(date)).map((course) => sanitizeCourse(course, date));
 
 		return jsonWithHeaders(
 			{

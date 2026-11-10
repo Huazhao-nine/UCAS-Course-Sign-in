@@ -725,9 +725,11 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 .weekly-schedule-line { border-bottom: 1px dashed color-mix(in oklab, var(--line) 78%, transparent); border-left: 1px solid color-mix(in oklab, var(--line) 55%, transparent); background: color-mix(in oklab, var(--surface-raised) 96%, var(--surface)); }
 .weekly-grid-course { position: relative; z-index: 3; min-width: 0; margin: 0.22rem; }
 .weekly-grid-course__content { position: absolute; inset: 0; display: flex; flex-direction: column; gap: 0.32rem; overflow: hidden; border: 1px solid; border-radius: 0.65rem; padding: 0.55rem; box-shadow: 0 3px 9px color-mix(in oklab, var(--shadow-soft) 38%, transparent); }
-.weekly-grid-course__content > div { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.35rem; }
+.weekly-grid-course__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.35rem; }
 .weekly-grid-course h3 { min-width: 0; font-size: 0.82rem; font-weight: 750; line-height: 1.42; overflow-wrap: anywhere; }
-.weekly-grid-course__content span { flex: none; border: 1px solid currentColor; border-radius: 999px; padding: 0.08rem 0.3rem; font-size: 0.58rem; font-weight: 700; }
+.weekly-grid-course__badges, .daily-schedule-course__badges { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 0.22rem; }
+.weekly-grid-course__badges > span, .daily-schedule-course__badges > span { flex: none; border: 1px solid currentColor; border-radius: 999px; padding: 0.08rem 0.3rem; font-size: 0.58rem; font-weight: 700; white-space: nowrap; }
+.course-week-progress { opacity: 0.88; }
 .weekly-grid-course p { font-size: 0.68rem; line-height: 1.3; overflow-wrap: anywhere; }
 .weekly-grid-course--unsigned .weekly-grid-course__content { border-color: var(--status-chip-unsigned-border); background: var(--status-chip-unsigned-bg); color: var(--status-chip-unsigned-text); }
 .weekly-grid-course--signed .weekly-grid-course__content { border-color: var(--status-chip-signed-border); background: var(--status-chip-signed-bg); color: var(--status-chip-signed-text); }
@@ -822,14 +824,8 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 	line-height: 1.45;
 }
 
-.daily-schedule-course > div span {
-	flex: none;
-	border: 1px solid currentColor;
-	border-radius: 999px;
-	padding: 0.12rem 0.4rem;
-	font-size: 0.68rem;
-	font-weight: 700;
-}
+.daily-schedule-course__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem; }
+.daily-schedule-course__badges > span { padding: 0.12rem 0.4rem; font-size: 0.68rem; }
 
 .daily-schedule-course > p {
 	margin-top: 0.35rem;
