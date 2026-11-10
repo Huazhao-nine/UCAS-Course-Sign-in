@@ -5,7 +5,6 @@ import { FormEvent, useDeferredValue, useEffect, useMemo, useRef, useState } fro
 type CourseItem = {
 	id: string;
 	uuid: string;
-	courseId: string;
 	courseName: string;
 	teacherName: string;
 	classroom: string;
@@ -61,18 +60,9 @@ type SavedCredentials = {
 type CourseWeekSettings = {
 	weekOneMonday: string | null;
 	totals: Record<string, number>;
-	courseTimeIds: Record<string, string>;
 };
 
-type CourseTimeDetail = {
-	courseTimeId: string;
-	courseName: string;
-	semesterName: string;
-	lastWeek: number;
-	sessions: Array<{ weekday: string; weeks: number[] }>;
-};
-
-const WEEK_SCHEDULE_CACHE_PREFIX = "ucas-week-schedule-cache-v3:";
+const WEEK_SCHEDULE_CACHE_PREFIX = "ucas-week-schedule-cache-v2:";
 const SAVED_CREDENTIALS_KEY = "ucas-saved-credentials-v1";
 const COURSE_WEEK_SETTINGS_PREFIX = "ucas-course-week-settings-v1:";
 // UCAS 的 get_timestamp.do 与 stu_scan_sign.action 运行在不同服务器上，
@@ -186,18 +176,15 @@ function clearSavedCredentials(): void {
 function readCourseWeekSettings(username: string): CourseWeekSettings {
 	try {
 		const raw = window.localStorage.getItem(`${COURSE_WEEK_SETTINGS_PREFIX}${getUsernameStorageKey(username)}`);
-		if (!raw) return { weekOneMonday: null, totals: {}, courseTimeIds: {} };
+		if (!raw) return { weekOneMonday: null, totals: {} };
 		const settings = JSON.parse(raw) as CourseWeekSettings;
 		const weekOneMonday = typeof settings.weekOneMonday === "string" && /^\d{4}-\d{2}-\d{2}$/.test(settings.weekOneMonday) ? settings.weekOneMonday : null;
 		const totals = Object.fromEntries(
 			Object.entries(settings.totals ?? {}).filter(([, value]) => Number.isInteger(value) && value >= 1 && value <= 40)
 		);
-		const courseTimeIds = Object.fromEntries(
-			Object.entries(settings.courseTimeIds ?? {}).filter(([, value]) => typeof value === "string" && /^\d{1,9}$/.test(value))
-		);
-		return { weekOneMonday, totals, courseTimeIds };
+		return { weekOneMonday, totals };
 	} catch {
-		return { weekOneMonday: null, totals: {}, courseTimeIds: {} };
+		return { weekOneMonday: null, totals: {} };
 	}
 }
 
@@ -293,7 +280,7 @@ function formatCourseWeekProgress(course: CourseItem): string | null {
 }
 
 function getCourseSettingsKey(course: CourseItem): string {
-	const source = [course.courseId || course.courseName, course.courseName, course.classroom]
+	const source = [course.uuid, course.courseName, course.teacherName, course.classroom, course.weekDay, course.classBeginTime, course.classEndTime]
 		.map((value) => value.trim().toLowerCase())
 		.join("\u001f");
 	let hash = 2166136261;
@@ -304,18 +291,12 @@ function getCourseSettingsKey(course: CourseItem): string {
 	return (hash >>> 0).toString(36);
 }
 
-function getDisplayedCourseWeekProgress(course: CourseItem, teachingWeek: number | null, totals: Record<string, number>, courseTimeDetails: Record<string, CourseTimeDetail>): string | null {
+function getDisplayedCourseWeekProgress(course: CourseItem, teachingWeek: number | null, totals: Record<string, number>): string | null {
 	const upstreamProgress = formatCourseWeekProgress(course);
 	if (upstreamProgress) return upstreamProgress;
-	const key = getCourseSettingsKey(course);
-	const total = courseTimeDetails[key]?.lastWeek ?? totals[key];
+	const total = totals[getCourseSettingsKey(course)];
 	if (!teachingWeek || !total || teachingWeek > total) return null;
 	return `${teachingWeek}/${total} 周`;
-}
-
-function extractCourseTimeId(value: string): string | null {
-	const matched = value.trim().match(/(?:coursetime\/)?(\d{1,9})\/?$/i);
-	return matched?.[1] ?? null;
 }
 
 function extractClockTime(value: string): string | null {
@@ -354,8 +335,6 @@ export default function Home() {
 	const [weekOneMonday, setWeekOneMonday] = useState<string | null>(null);
 	const [teachingWeekInput, setTeachingWeekInput] = useState("");
 	const [courseWeekTotals, setCourseWeekTotals] = useState<Record<string, number>>({});
-	const [courseTimeIds, setCourseTimeIds] = useState<Record<string, string>>({});
-	const [courseTimeDetails, setCourseTimeDetails] = useState<Record<string, CourseTimeDetail>>({});
 	const [statusKind, setStatusKind] = useState<StatusKind>("idle");
 	const [toast, setToast] = useState<ToastState | null>(null);
 	const [loading, setLoading] = useState(false);
@@ -433,16 +412,12 @@ export default function Home() {
 		if (!safeUsername) {
 			setWeekOneMonday(null);
 			setCourseWeekTotals({});
-			setCourseTimeIds({});
-			setCourseTimeDetails({});
 			setTeachingWeekInput("");
 			return;
 		}
 		const settings = readCourseWeekSettings(safeUsername);
 		setWeekOneMonday(settings.weekOneMonday);
 		setCourseWeekTotals(settings.totals);
-		setCourseTimeIds(settings.courseTimeIds);
-		setCourseTimeDetails({});
 		setTeachingWeekInput(String(getTeachingWeek(settings.weekOneMonday, date) ?? ""));
 	}, [date, username]);
 
@@ -494,29 +469,6 @@ export default function Home() {
 	const queryAttempted = statusKind !== "idle";
 	const hasKeyword = keyword.trim().length > 0;
 	const emptyHelpText = hasKeyword ? "可先清空筛选词，再查看全部课程" : "检查日期是否为上课日，并确认学号与密码正确";
-
-	useEffect(() => {
-		const visibleCourses = scheduleView === "week" ? weeklyDays.flatMap((day) => day.courses) : courses;
-		const toLoad = new Map<string, { course: CourseItem; courseTimeId: string }>();
-		for (const course of visibleCourses) {
-			const key = getCourseSettingsKey(course);
-			const courseTimeId = courseTimeIds[key];
-			if (courseTimeId && !courseTimeDetails[key]) toLoad.set(key, { course, courseTimeId });
-		}
-		if (toLoad.size === 0) return;
-		void Promise.all([...toLoad.entries()].map(async ([key, { course, courseTimeId }]) => {
-			try {
-				const response = await fetch("/api/course-week", {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({ courseTimeId, expectedCourseName: course.courseName })
-				});
-				if (!response.ok) return;
-				const detail = await response.json() as CourseTimeDetail;
-				setCourseTimeDetails((previous) => ({ ...previous, [key]: detail }));
-			} catch {}
-		}));
-	}, [courseTimeDetails, courseTimeIds, courses, scheduleView, weeklyDays]);
 
 	const queryCourses = async (skipWeekCache = false) => {
 		const compactDate = toYyyyMMdd(date);
@@ -626,33 +578,28 @@ export default function Home() {
 		}
 		const weekOne = shiftDateByWeeks(getMondayDateInput(date), 1 - selectedWeek);
 		setWeekOneMonday(weekOne);
-		writeCourseWeekSettings(safeUsername, { weekOneMonday: weekOne, totals: courseWeekTotals, courseTimeIds });
+		writeCourseWeekSettings(safeUsername, { weekOneMonday: weekOne, totals: courseWeekTotals });
 		updateActionStatus("success", `已记录本周为第 ${selectedWeek} 教学周`);
 	};
 
-	const onSetCourseTimeLink = (course: CourseItem) => {
+	const onSetCourseWeekTotal = (course: CourseItem) => {
 		const safeUsername = username.trim();
 		if (!safeUsername) {
-			updateActionStatus("error", "请先输入学号，再关联教务课程");
+			updateActionStatus("error", "请先输入学号，再设置课程总周数");
 			return;
 		}
 		const key = getCourseSettingsKey(course);
-		const response = window.prompt(`粘贴“${course.courseName || "该课程"}”的教务课程时间链接或编号`, courseTimeIds[key] ?? "");
+		const response = window.prompt(`设置“${course.courseName || "该课程"}”的总周数（1-40）`, String(courseWeekTotals[key] ?? 20));
 		if (response === null) return;
-		const courseTimeId = extractCourseTimeId(response);
-		if (!courseTimeId) {
-			updateActionStatus("error", "请输入课程时间页链接或数字编号，例如 314390");
+		const total = Number(response.trim());
+		if (!Number.isInteger(total) || total < 1 || total > 40) {
+			updateActionStatus("error", "课程总周数应为 1 到 40 的整数");
 			return;
 		}
-		const nextCourseTimeIds = { ...courseTimeIds, [key]: courseTimeId };
-		setCourseTimeIds(nextCourseTimeIds);
-		setCourseTimeDetails((previous) => {
-			const next = { ...previous };
-			delete next[key];
-			return next;
-		});
-		writeCourseWeekSettings(safeUsername, { weekOneMonday, totals: courseWeekTotals, courseTimeIds: nextCourseTimeIds });
-		updateActionStatus("info", "正在读取教务课程时间页中的上课周次…");
+		const totals = { ...courseWeekTotals, [key]: total };
+		setCourseWeekTotals(totals);
+		writeCourseWeekSettings(safeUsername, { weekOneMonday, totals });
+		updateActionStatus("success", `已设置“${course.courseName || "该课程"}”共 ${total} 周`);
 	};
 
 	const refreshCoursesAfterSign = async (): Promise<{ ok: true; total: number } | { ok: false }> => {
@@ -906,7 +853,7 @@ export default function Home() {
 									<div className="teaching-week-settings" aria-label="课程周次设置">
 										<label>所选周是第 <input type="number" min="1" max="40" inputMode="numeric" value={teachingWeekInput} onChange={(event) => setTeachingWeekInput(event.target.value)} aria-label="所选周教学周数" /> 周</label>
 										<button type="button" className="action-btn action-btn--quiet min-h-8 rounded-lg px-3 py-1 text-xs font-semibold" onClick={onSaveTeachingWeek}>保存</button>
-										<span>{teachingWeek ? `已按第 ${teachingWeek} 教学周计算；首次关联课程的教务时间页后会自动显示进度。` : "首次填一次即可；之后会随所选日期自动换算。"}</span>
+										<span>{teachingWeek ? `已按第 ${teachingWeek} 教学周计算；点课程内“设总周数”即可显示进度。` : "首次填一次即可；之后会随所选日期自动换算。"}</span>
 									</div>
 								) : null}
 
@@ -923,12 +870,11 @@ export default function Home() {
 														const range = getCoursePeriodRange(course);
 														if (!range) return null;
 														const signed = course.signStatus === "1";
-																const courseSettingsKey = getCourseSettingsKey(course);
-																const weekProgress = getDisplayedCourseWeekProgress(course, teachingWeek, courseWeekTotals, courseTimeDetails);
+																const weekProgress = getDisplayedCourseWeekProgress(course, teachingWeek, courseWeekTotals);
 														const courseKey = `${day.date}-${course.id}-${course.uuid}`;
 														const signingThisCourse = signingCourseUuid === course.uuid;
 														return <article key={courseKey} style={{ gridColumn: dayIndex + 2, gridRow: `${range.start + 1} / ${range.end + 2}` }} className={`weekly-grid-course ${signed ? "weekly-grid-course--signed" : "weekly-grid-course--unsigned"}`}>
-																	<div className="weekly-grid-course__content"><div className="weekly-grid-course__heading"><h3 title={course.courseName || ""}>{course.courseName || "--"}</h3><div className="weekly-grid-course__badges"><span>{signed ? "已签到" : "未签到"}</span>{weekProgress ? <span className="course-week-progress" aria-label={`课程进度：第 ${weekProgress}`}>{weekProgress}</span> : <button type="button" className="course-week-progress course-week-progress--setup" onClick={() => onSetCourseTimeLink(course)}>{courseTimeIds[courseSettingsKey] ? "读取周次…" : "关联教务课"}</button>}</div></div><p>{course.classroom || "教室待课表接口提供"}</p><p>{course.teacherName || "--"}</p>{signed ? <button type="button" disabled className="weekly-grid-course__action">已签到</button> : <button type="button" onClick={() => onCourseSign(course)} disabled={loading || signingThisCourse} className="weekly-grid-course__action">{signingThisCourse ? "签到中..." : "点击签到"}</button>}</div>
+																	<div className="weekly-grid-course__content"><div className="weekly-grid-course__heading"><h3 title={course.courseName || ""}>{course.courseName || "--"}</h3><div className="weekly-grid-course__badges"><span>{signed ? "已签到" : "未签到"}</span>{weekProgress ? <span className="course-week-progress" aria-label={`课程进度：第 ${weekProgress}`}>{weekProgress}</span> : <button type="button" className="course-week-progress course-week-progress--setup" onClick={() => onSetCourseWeekTotal(course)}>设总周数</button>}</div></div><p>{course.classroom || "教室待课表接口提供"}</p><p>{course.teacherName || "--"}</p>{signed ? <button type="button" disabled className="weekly-grid-course__action">已签到</button> : <button type="button" onClick={() => onCourseSign(course)} disabled={loading || signingThisCourse} className="weekly-grid-course__action">{signingThisCourse ? "签到中..." : "点击签到"}</button>}</div>
 														</article>;
 													}))}
 												</div>
@@ -955,12 +901,11 @@ export default function Home() {
 												{PERIODS.map((period) => <div key={`line-${period.n}`} className="daily-schedule-line" style={{ gridRow: period.n }} />)}
 												{dailySchedule.scheduled.map(({ course, range }) => {
 													const signed = course.signStatus === "1";
-															const courseSettingsKey = getCourseSettingsKey(course);
-															const weekProgress = getDisplayedCourseWeekProgress(course, teachingWeek, courseWeekTotals, courseTimeDetails);
+															const weekProgress = getDisplayedCourseWeekProgress(course, teachingWeek, courseWeekTotals);
 													const signingThisCourse = signingCourseUuid === course.uuid;
 													return (
 														<article key={`${course.id}-${course.uuid}`} style={{ gridRow: `${range.start} / ${range.end + 1}` }} className={`daily-schedule-course ${signed ? "daily-schedule-course--signed" : "daily-schedule-course--unsigned"}`}>
-																	<div className="daily-schedule-course__heading"><h3>{course.courseName || "--"}</h3><div className="daily-schedule-course__badges"><span>{signed ? "已签到" : "未签到"}</span>{weekProgress ? <span className="course-week-progress" aria-label={`课程进度：第 ${weekProgress}`}>{weekProgress}</span> : <button type="button" className="course-week-progress course-week-progress--setup" onClick={() => onSetCourseTimeLink(course)}>{courseTimeIds[courseSettingsKey] ? "读取周次…" : "关联教务课"}</button>}</div></div>
+																	<div className="daily-schedule-course__heading"><h3>{course.courseName || "--"}</h3><div className="daily-schedule-course__badges"><span>{signed ? "已签到" : "未签到"}</span>{weekProgress ? <span className="course-week-progress" aria-label={`课程进度：第 ${weekProgress}`}>{weekProgress}</span> : <button type="button" className="course-week-progress course-week-progress--setup" onClick={() => onSetCourseWeekTotal(course)}>设总周数</button>}</div></div>
 															<p>{course.teacherName || "--"} · {course.classroom || "教室待课表接口提供"}</p>
 															<p>{formatCoursePeriods(course)}</p>
 															<button type="button" onClick={() => onCourseSign(course)} disabled={loading || signed || signingThisCourse} className="action-btn action-btn--primary mt-3 min-h-9 rounded-lg px-3 py-1.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60">{signingThisCourse ? "签到中..." : signed ? "已签到" : "签到"}</button>
