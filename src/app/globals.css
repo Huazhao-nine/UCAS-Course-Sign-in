@@ -713,6 +713,10 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 
 .weekly-cache-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem; }
 .weekly-cache-actions > span { width: 100%; color: var(--muted); font-size: 0.7rem; }
+.teaching-week-settings { display: flex; flex-wrap: wrap; align-items: center; gap: 0.45rem 0.6rem; margin-top: 0.75rem; padding: 0.6rem 0.75rem; border: 1px solid var(--line); border-radius: 0.7rem; background: color-mix(in oklab, var(--surface-raised) 88%, var(--surface)); color: var(--muted); font-size: 0.74rem; }
+.teaching-week-settings label { display: inline-flex; align-items: center; gap: 0.25rem; color: var(--ink); font-weight: 700; }
+.teaching-week-settings input { width: 3.4rem; min-height: 2rem; border: 1px solid var(--line-strong); border-radius: 0.42rem; padding: 0.1rem 0.35rem; background: var(--paper-strong); color: var(--ink); font: inherit; text-align: center; }
+.teaching-week-settings > span { flex-basis: 100%; font-size: 0.68rem; line-height: 1.4; }
 .weekly-schedule-wrap { overflow-x: auto; scroll-padding-inline-start: 82px; overscroll-behavior-x: contain; border: 1px solid var(--line); border-radius: 0.9rem; background: var(--surface-raised); box-shadow: 0 10px 28px color-mix(in oklab, var(--shadow-soft) 24%, transparent); -webkit-overflow-scrolling: touch; }
 .weekly-schedule-grid { display: grid; min-width: 1360px; grid-template-columns: 82px repeat(7, minmax(180px, 1fr)); grid-template-rows: 3.7rem repeat(13, minmax(120px, 1fr)); position: relative; }
 .weekly-schedule-corner, .weekly-schedule-day-header { position: sticky; top: 0; z-index: 4; display: grid; align-content: center; justify-items: center; border-bottom: 1px solid var(--line); background: var(--paper-strong); color: var(--muted); font-size: 0.74rem; }
@@ -730,6 +734,7 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 .weekly-grid-course__badges, .daily-schedule-course__badges { display: flex; flex: none; flex-wrap: wrap; justify-content: flex-end; gap: 0.22rem; }
 .weekly-grid-course__badges > span, .daily-schedule-course__badges > span { flex: none; border: 1px solid currentColor; border-radius: 999px; padding: 0.08rem 0.3rem; font-size: 0.58rem; font-weight: 700; white-space: nowrap; }
 .course-week-progress { opacity: 0.88; }
+.course-week-progress--setup { flex: none; border: 1px dashed currentColor; border-radius: 999px; padding: 0.08rem 0.3rem; background: transparent; color: inherit; font-size: 0.58rem; font-weight: 700; white-space: nowrap; cursor: pointer; }
 .weekly-grid-course p { font-size: 0.68rem; line-height: 1.3; overflow-wrap: anywhere; }
 .weekly-grid-course--unsigned .weekly-grid-course__content { border-color: var(--status-chip-unsigned-border); background: var(--status-chip-unsigned-bg); color: var(--status-chip-unsigned-text); }
 .weekly-grid-course--signed .weekly-grid-course__content { border-color: var(--status-chip-signed-border); background: var(--status-chip-signed-bg); color: var(--status-chip-signed-text); }
@@ -826,6 +831,7 @@ input[type="date"].input-surface::-webkit-calendar-picker-indicator {
 
 .daily-schedule-course__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem; }
 .daily-schedule-course__badges > span { padding: 0.12rem 0.4rem; font-size: 0.68rem; }
+.daily-schedule-course__badges .course-week-progress--setup { padding: 0.12rem 0.4rem; font-size: 0.68rem; }
 
 .daily-schedule-course > p {
 	margin-top: 0.35rem;
